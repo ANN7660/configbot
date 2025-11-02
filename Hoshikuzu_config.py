@@ -58,7 +58,6 @@ EMOJI = "<a:caarrow:1433143710094196997>"
 @bot.event
 async def on_ready():
     print(f"✅ Connecté comme {bot.user}")
-
 # === Commandes Utiles ===
 @bot.command(name="help")
 async def help_cmd(ctx):
@@ -135,7 +134,7 @@ async def disallowlink(ctx, channel: discord.TextChannel):
         await ctx.send(f"❌ Liens désactivés dans {channel.mention}")
     else:
         await ctx.send(f"ℹ️ Les liens étaient déjà désactivés ici.")
-# === Config View ===
+# === Panneau de configuration ===
 class ConfigView(discord.ui.View):
     def __init__(self, guild, author_id, timeout=180):
         super().__init__(timeout=timeout)
@@ -147,79 +146,48 @@ class ConfigView(discord.ui.View):
             opts = [discord.SelectOption(label="Aucun", value="0")]
 
         self.add_item(discord.ui.Select(placeholder="Salon logs", options=opts, custom_id="logs", row=0))
-        self.add_item(discord.ui.Select(placeholder="Salon embed bienvenue", options=opts, custom_id="welcome_embed", row=1))
-        self.add_item(discord.ui.Select(placeholder="Salon texte bienvenue", options=opts, custom_id="welcome_text", row=2))
-        self.add_item(discord.ui.Select(placeholder="Salon embed au revoir", options=opts, custom_id="leave_embed", row=3))
-        self.add_item(discord.ui.Select(placeholder="Salon texte au revoir", options=opts, custom_id="leave_text", row=4))
-        self.add_item(discord.ui.Select(placeholder="Salon des invitations", options=opts, custom_id="invites", row=5))
-        self.add_item(discord.ui.Button(label="Définir role join", style=discord.ButtonStyle.blurple, custom_id="set_rolejoin", row=6))
-        self.add_item(discord.ui.Button(label="Activer allow_links", style=discord.ButtonStyle.green, custom_id="enable_links", row=6))
-        self.add_item(discord.ui.Button(label="Désactiver allow_links", style=discord.ButtonStyle.gray, custom_id="disable_links", row=6))
+        self.add_item(discord.ui.Select(placeholder="Bienvenue embed", options=opts, custom_id="welcome_embed", row=1))
+        self.add_item(discord.ui.Select(placeholder="Bienvenue texte", options=opts, custom_id="welcome_text", row=2))
+        self.add_item(discord.ui.Select(placeholder="Au revoir embed", options=opts, custom_id="leave_embed", row=3))
+        self.add_item(discord.ui.Select(placeholder="Au revoir texte", options=opts, custom_id="leave_text", row=4))
 
     async def interaction_check(self, interaction):
-        if interaction.user.id != self.author_id and not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ Tu n'es pas autorisé.", ephemeral=True)
-            return False
-        return True
+        return interaction.user.id == self.author_id or interaction.user.guild_permissions.manage_guild
 
     async def on_interaction(self, interaction: discord.Interaction):
-        try:
-            cid = interaction.data.get("custom_id")
-            val = None
-            if "values" in interaction.data:
-                val = int(interaction.data["values"][0])
+        cid = interaction.data.get("custom_id")
+        val = int(interaction.data["values"][0])
+        gid = self.guild.id
 
-            if cid == "logs":
-                set_conf(self.guild.id, "logs_channel", val)
-                await interaction.response.send_message(f"✅ Salon logs défini : <#{val}>", ephemeral=True)
-            elif cid == "welcome_embed":
-                set_conf(self.guild.id, "welcome_embed_channel", val)
-                await interaction.response.send_message(f"✅ Salon embed bienvenue défini : <#{val}>", ephemeral=True)
-            elif cid == "welcome_text":
-                set_conf(self.guild.id, "welcome_text_channel", val)
-                await interaction.response.send_message(f"✅ Salon texte bienvenue défini : <#{val}>", ephemeral=True)
-            elif cid == "leave_embed":
-                set_conf(self.guild.id, "leave_embed_channel", val)
-                await interaction.response.send_message(f"✅ Salon embed au revoir défini : <#{val}>", ephemeral=True)
-            elif cid == "leave_text":
-                set_conf(self.guild.id, "leave_text_channel", val)
-                await interaction.response.send_message(f"✅ Salon texte au revoir défini : <#{val}>", ephemeral=True)
-            elif cid == "invites":
-                set_conf(self.guild.id, "invites_channel", val)
-                await interaction.response.send_message(f"✅ Salon des invitations défini : <#{val}>", ephemeral=True)
-            elif cid == "enable_links":
-                set_conf(self.guild.id, "allow_links_enabled", True)
-                await interaction.response.send_message("✅ allow_links activé.", ephemeral=True)
-            elif cid == "disable_links":
-                set_conf(self.guild.id, "allow_links_enabled", False)
-                set_conf(self.guild.id, "allow_links", [])
-                await interaction.response.send_message("✅ allow_links désactivé.", ephemeral=True)
-            elif cid == "set_rolejoin":
-                await interaction.response.send_message("ℹ️ Utilise `+rolejoin @Role` pour définir le rôle d’arrivée.", ephemeral=True)
-        except Exception as e:
-            traceback.print_exc()
-            await interaction.response.send_message(f"Erreur : {e}", ephemeral=True)
+        if cid == "logs":
+            set_conf(gid, "logs_channel", val)
+            await interaction.response.send_message(f"✅ Salon logs défini : <#{val}>", ephemeral=True)
+        elif cid == "welcome_embed":
+            set_conf(gid, "welcome_embed_channel", val)
+            await interaction.response.send_message(f"✅ Salon embed bienvenue défini : <#{val}>", ephemeral=True)
+        elif cid == "welcome_text":
+            set_conf(gid, "welcome_text_channel", val)
+            await interaction.response.send_message(f"✅ Salon texte bienvenue défini : <#{val}>", ephemeral=True)
+        elif cid == "leave_embed":
+            set_conf(gid, "leave_embed_channel", val)
+            await interaction.response.send_message(f"✅ Salon embed au revoir défini : <#{val}>", ephemeral=True)
+        elif cid == "leave_text":
+            set_conf(gid, "leave_text_channel", val)
+            await interaction.response.send_message(f"✅ Salon texte au revoir défini : <#{val}>", ephemeral=True)
 
 @bot.command(name="config")
 @commands.has_permissions(manage_guild=True)
 async def config_cmd(ctx):
-    try:
-        view = ConfigView(ctx.guild, ctx.author.id)
-        conf = get_gconf(ctx.guild.id)
-        e = discord.Embed(title="⚙️ Panneau de configuration — Hoshikuzu", color=discord.Color.green())
-        e.add_field(name="Logs", value=f"<#{conf.get('logs_channel')}>" if conf.get("logs_channel") else "Aucun", inline=True)
-        e.add_field(name="Bienvenue (embed)", value=f"<#{conf.get('welcome_embed_channel')}>" if conf.get("welcome_embed_channel") else "Aucun", inline=True)
-        e.add_field(name="Bienvenue (texte)", value=f"<#{conf.get('welcome_text_channel')}>" if conf.get("welcome_text_channel") else "Aucun", inline=True)
-        e.add_field(name="Au revoir (embed)", value=f"<#{conf.get('leave_embed_channel')}>" if conf.get("leave_embed_channel") else "Aucun", inline=True)
-        e.add_field(name="Au revoir (texte)", value=f"<#{conf.get('leave_text_channel')}>" if conf.get("leave_text_channel") else "Aucun", inline=True)
-        e.add_field(name="Invites", value=f"<#{conf.get('invites_channel')}>" if conf.get("invites_channel") else "Aucun", inline=True)
-        e.add_field(name="Rolejoin", value=f"<@&{conf.get('auto_role')}>" if conf.get("auto_role") else "Aucun", inline=True)
-        await ctx.send(embed=e, view=view)
-    except Exception as e:
-        traceback.print_exc()
-        await ctx.send(f"❌ Erreur : `{type(e).__name__}` — {e}")
+    conf = get_gconf(ctx.guild.id)
+    e = discord.Embed(title="⚙️ Configuration Hoshikuzu", color=discord.Color.green())
+    e.add_field(name="Logs", value=f"<#{conf.get('logs_channel')}>" if conf.get("logs_channel") else "Aucun", inline=True)
+    e.add_field(name="Bienvenue (embed)", value=f"<#{conf.get('welcome_embed_channel')}>" if conf.get("welcome_embed_channel") else "Aucun", inline=True)
+    e.add_field(name="Bienvenue (texte)", value=f"<#{conf.get('welcome_text_channel')}>" if conf.get("welcome_text_channel") else "Aucun", inline=True)
+    e.add_field(name="Au revoir (embed)", value=f"<#{conf.get('leave_embed_channel')}>" if conf.get("leave_embed_channel") else "Aucun", inline=True)
+    e.add_field(name="Au revoir (texte)", value=f"<#{conf.get('leave_text_channel')}>" if conf.get("leave_text_channel") else "Aucun", inline=True)
+    await ctx.send(embed=e, view=ConfigView(ctx.guild, ctx.author.id))
 
-# === Messages de bienvenue et au revoir ===
+# === Événements bienvenue / au revoir ===
 @bot.event
 async def on_member_join(member):
     gid = member.guild.id
@@ -263,7 +231,6 @@ async def on_member_remove(member):
         ch = bot.get_channel(text_id)
         if ch:
             await ch.send(f"{EMOJI} {member.name} a quitté le serveur.\n{EMOJI} Il reste **{total}** membres.")
-
 # === Commandes de test bienvenue / au revoir ===
 @bot.command(name="testwelcome")
 @commands.has_permissions(manage_guild=True)
@@ -297,4 +264,60 @@ async def test_leave(ctx):
     if embed_id:
         ch = bot.get_channel(embed_id)
         if ch:
-            e = discord.Embed(title="👋 Au revoir (test)",
+            e = discord.Embed(
+                title="👋 Au revoir (test)",
+                description=f"{ctx.author.name} a quitté le serveur.",
+                color=discord.Color.red()
+            )
+            e.set_footer(text=f"Il reste {total} membres.")
+            await ch.send(embed=e)
+
+    text_id = get_conf(gid, "leave_text_channel")
+    if text_id:
+        ch = bot.get_channel(text_id)
+        if ch:
+            await ch.send(
+                f"{EMOJI} {ctx.author.name} a quitté le serveur.\n"
+                f"{EMOJI} Il reste **{total}** membres."
+            )
+
+    await ctx.send("✅ Test d’au revoir envoyé.")
+
+# === Salon vocal temporaire ===
+VOC_TRIGGER_NAME = "🔊Créer un voc"
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    try:
+        if after.channel and after.channel.name == VOC_TRIGGER_NAME:
+            guild = member.guild
+            category = after.channel.category
+            temp_channel = await guild.create_voice_channel(
+                name=f"🎙️ {member.name}",
+                category=category,
+                user_limit=1
+            )
+            await member.move_to(temp_channel)
+
+        if before.channel and before.channel != after.channel:
+            channel = before.channel
+            if channel.name.startswith("🎙️") and len(channel.members) == 0:
+                await channel.delete()
+    except Exception as e:
+        print(f"Erreur voc temporaire : {e}")
+
+# === Lancement sécurisé ===
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
+if not TOKEN or TOKEN.strip() == "":
+    print("❌ Le token Discord est vide ou non défini. Vérifie les variables d’environnement sur Render.")
+    while True:
+        pass
+else:
+    try:
+        print("✅ Lancement du bot avec le token depuis Render.")
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"❌ Erreur lors du lancement du bot : {e}")
+        while True:
+            pass
