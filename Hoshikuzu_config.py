@@ -198,4 +198,21 @@ async def test_leave(ctx):
 # === Salon vocal temporaire ===
 VOC_TRIGGER_NAME = "🔊Créer un voc"
 
-@bot
+@bot.event
+async def on_voice_state_update(member, before, after):
+    try:
+        if after.channel and after.channel.name == VOC_TRIGGER_NAME:
+            guild = member.guild
+            category = after.channel.category
+            temp_channel = await guild.create_voice_channel(
+                name=f"🎙️ {member.name}",
+                category=category,
+                user_limit=1
+            )
+            await member.move_to(temp_channel)
+
+        if before.channel and before.channel != after.channel:
+            channel = before.channel
+            if channel.name.startswith("🎙️") and len(channel.members) == 0:
+                await channel.delete()
+    except
