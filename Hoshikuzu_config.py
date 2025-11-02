@@ -3,7 +3,7 @@ import os, json, threading, http.server, socketserver, traceback
 import discord
 from discord.ext import commands
 
-# === Keep Alive (Render) ===
+# === Keep Alive ===
 def keep_alive():
     try:
         port = int(os.environ.get("PORT", 8080))
@@ -59,7 +59,7 @@ EMOJI = "<a:caarrow:1433143710094196997>"
 async def on_ready():
     print(f"✅ Connecté comme {bot.user}")
 
-# === Commandes ===
+# === Commandes Utiles ===
 @bot.command(name="help")
 async def help_cmd(ctx):
     e = discord.Embed(title="🌿 Hoshikuzu — Commandes", color=discord.Color.green())
@@ -69,6 +69,7 @@ async def help_cmd(ctx):
     e.add_field(name="Lock", value="`+lock` / `+unlock`", inline=False)
     e.add_field(name="Roles", value="`+role @user @role` / `+rolejoin @role`", inline=False)
     e.add_field(name="Tickets", value="`+ticket`", inline=False)
+    e.add_field(name="Tests", value="`+testwelcome` / `+testleave`", inline=False)
     await ctx.send(embed=e)
 
 @bot.command(name="lock")
@@ -146,12 +147,14 @@ class ConfigView(discord.ui.View):
             opts = [discord.SelectOption(label="Aucun", value="0")]
 
         self.add_item(discord.ui.Select(placeholder="Salon logs", options=opts, custom_id="logs", row=0))
-        self.add_item(discord.ui.Select(placeholder="Salon bienvenue", options=opts, custom_id="welcome", row=1))
-        self.add_item(discord.ui.Select(placeholder="Salon au revoir", options=opts, custom_id="leave", row=2))
-        self.add_item(discord.ui.Select(placeholder="Salon des invitations", options=opts, custom_id="invites", row=3))
-        self.add_item(discord.ui.Button(label="Définir role join", style=discord.ButtonStyle.blurple, custom_id="set_rolejoin", row=4))
-        self.add_item(discord.ui.Button(label="Activer allow_links", style=discord.ButtonStyle.green, custom_id="enable_links", row=4))
-        self.add_item(discord.ui.Button(label="Désactiver allow_links", style=discord.ButtonStyle.gray, custom_id="disable_links", row=4))
+        self.add_item(discord.ui.Select(placeholder="Salon embed bienvenue", options=opts, custom_id="welcome_embed", row=1))
+        self.add_item(discord.ui.Select(placeholder="Salon texte bienvenue", options=opts, custom_id="welcome_text", row=2))
+        self.add_item(discord.ui.Select(placeholder="Salon embed au revoir", options=opts, custom_id="leave_embed", row=3))
+        self.add_item(discord.ui.Select(placeholder="Salon texte au revoir", options=opts, custom_id="leave_text", row=4))
+        self.add_item(discord.ui.Select(placeholder="Salon des invitations", options=opts, custom_id="invites", row=5))
+        self.add_item(discord.ui.Button(label="Définir role join", style=discord.ButtonStyle.blurple, custom_id="set_rolejoin", row=6))
+        self.add_item(discord.ui.Button(label="Activer allow_links", style=discord.ButtonStyle.green, custom_id="enable_links", row=6))
+        self.add_item(discord.ui.Button(label="Désactiver allow_links", style=discord.ButtonStyle.gray, custom_id="disable_links", row=6))
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.author_id and not interaction.user.guild_permissions.manage_guild:
@@ -169,12 +172,18 @@ class ConfigView(discord.ui.View):
             if cid == "logs":
                 set_conf(self.guild.id, "logs_channel", val)
                 await interaction.response.send_message(f"✅ Salon logs défini : <#{val}>", ephemeral=True)
-            elif cid == "welcome":
-                set_conf(self.guild.id, "welcome_channel", val)
-                await interaction.response.send_message(f"✅ Salon bienvenue défini : <#{val}>", ephemeral=True)
-            elif cid == "leave":
-                set_conf(self.guild.id, "leave_channel", val)
-                await interaction.response.send_message(f"✅ Salon au revoir défini : <#{val}>", ephemeral=True)
+            elif cid == "welcome_embed":
+                set_conf(self.guild.id, "welcome_embed_channel", val)
+                await interaction.response.send_message(f"✅ Salon embed bienvenue défini : <#{val}>", ephemeral=True)
+            elif cid == "welcome_text":
+                set_conf(self.guild.id, "welcome_text_channel", val)
+                await interaction.response.send_message(f"✅ Salon texte bienvenue défini : <#{val}>", ephemeral=True)
+            elif cid == "leave_embed":
+                set_conf(self.guild.id, "leave_embed_channel", val)
+                await interaction.response.send_message(f"✅ Salon embed au revoir défini : <#{val}>", ephemeral=True)
+            elif cid == "leave_text":
+                set_conf(self.guild.id, "leave_text_channel", val)
+                await interaction.response.send_message(f"✅ Salon texte au revoir défini : <#{val}>", ephemeral=True)
             elif cid == "invites":
                 set_conf(self.guild.id, "invites_channel", val)
                 await interaction.response.send_message(f"✅ Salon des invitations défini : <#{val}>", ephemeral=True)
@@ -199,8 +208,10 @@ async def config_cmd(ctx):
         conf = get_gconf(ctx.guild.id)
         e = discord.Embed(title="⚙️ Panneau de configuration — Hoshikuzu", color=discord.Color.green())
         e.add_field(name="Logs", value=f"<#{conf.get('logs_channel')}>" if conf.get("logs_channel") else "Aucun", inline=True)
-        e.add_field(name="Bienvenue", value=f"<#{conf.get('welcome_channel')}>" if conf.get("welcome_channel") else "Aucun", inline=True)
-        e.add_field(name="Au revoir", value=f"<#{conf.get('leave_channel')}>" if conf.get("leave_channel") else "Aucun", inline=True)
+        e.add_field(name="Bienvenue (embed)", value=f"<#{conf.get('welcome_embed_channel')}>" if conf.get("welcome_embed_channel") else "Aucun", inline=True)
+        e.add_field(name="Bienvenue (texte)", value=f"<#{conf.get('welcome_text_channel')}>" if conf.get("welcome_text_channel") else "Aucun", inline=True)
+        e.add_field(name="Au revoir (embed)", value=f"<#{conf.get('leave_embed_channel')}>" if conf.get("leave_embed_channel") else "Aucun", inline=True)
+        e.add_field(name="Au revoir (texte)", value=f"<#{conf.get('leave_text_channel')}>" if conf.get("leave_text_channel") else "Aucun", inline=True)
         e.add_field(name="Invites", value=f"<#{conf.get('invites_channel')}>" if conf.get("invites_channel") else "Aucun", inline=True)
         e.add_field(name="Rolejoin", value=f"<@&{conf.get('auto_role')}>" if conf.get("auto_role") else "Aucun", inline=True)
         await ctx.send(embed=e, view=view)
@@ -211,83 +222,79 @@ async def config_cmd(ctx):
 # === Messages de bienvenue et au revoir ===
 @bot.event
 async def on_member_join(member):
-    guild_id = member.guild.id
-    channel_id = get_conf(guild_id, "welcome_channel")
-    if channel_id:
-        channel = bot.get_channel(channel_id)
-        if channel:
-            total = member.guild.member_count
+    gid = member.guild.id
+    total = member.guild.member_count
 
-            embed = discord.Embed(
-                title="🌿 Bienvenue !",
-                description=f"{member.mention} a rejoint le serveur.",
-                color=discord.Color.green()
-            )
-            embed.set_footer(text=f"Tu es le {total}ᵉ membre !")
-            await channel.send(embed=embed)
+    embed_id = get_conf(gid, "welcome_embed_channel")
+    if embed_id:
+        ch = bot.get_channel(embed_id)
+        if ch:
+            e = discord.Embed(title="🌿 Bienvenue !", description=f"{member.mention} a rejoint le serveur.", color=discord.Color.green())
+            e.set_footer(text=f"Tu es le {total}ᵉ membre !")
+            await ch.send(embed=e)
 
-            await channel.send(
-                f"{EMOJI} Bienvenue {member.mention} sur le serveur !\n"
-                f"{EMOJI} Tu es le **{total}ᵉ** membre !"
-            )
+    text_id = get_conf(gid, "welcome_text_channel")
+    if text_id:
+        ch = bot.get_channel(text_id)
+        if ch:
+            await ch.send(f"{EMOJI} Bienvenue {member.mention} sur le serveur !\n{EMOJI} Tu es le **{total}ᵉ** membre !")
 
-            auto_role_id = get_conf(guild_id, "auto_role")
-            if auto_role_id:
-                role = member.guild.get_role(auto_role_id)
-                if role:
-                    await member.add_roles(role)
+    role_id = get_conf(gid, "auto_role")
+    if role_id:
+        role = member.guild.get_role(role_id)
+        if role:
+            await member.add_roles(role)
 
 @bot.event
 async def on_member_remove(member):
-    guild_id = member.guild.id
-    channel_id = get_conf(guild_id, "leave_channel")
-    if channel_id:
-        channel = bot.get_channel(channel_id)
-        if channel:
-            total = member.guild.member_count
-            embed = discord.Embed(
-                title="👋 Au revoir !",
-                description=f"{member.name} a quitté le serveur.",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text=f"Il reste {total} membres.")
-            await channel.send(embed=embed)
+    gid = member.guild.id
+    total = member.guild.member_count
 
-# === Salon vocal temporaire ===
-VOC_TRIGGER_NAME = "🔊Créer un voc"
+    embed_id = get_conf(gid, "leave_embed_channel")
+    if embed_id:
+        ch = bot.get_channel(embed_id)
+        if ch:
+            e = discord.Embed(title="👋 Au revoir !", description=f"{member.name} a quitté le serveur.", color=discord.Color.red())
+            e.set_footer(text=f"Il reste {total} membres.")
+            await ch.send(embed=e)
 
-@bot.event
-async def on_voice_state_update(member, before, after):
-    try:
-        if after.channel and after.channel.name == VOC_TRIGGER_NAME:
-            guild = member.guild
-            category = after.channel.category
-            temp_channel = await guild.create_voice_channel(
-                name=f"🎙️ {member.name}",
-                category=category,
-                user_limit=1
-            )
-            await member.move_to(temp_channel)
+    text_id = get_conf(gid, "leave_text_channel")
+    if text_id:
+        ch = bot.get_channel(text_id)
+        if ch:
+            await ch.send(f"{EMOJI} {member.name} a quitté le serveur.\n{EMOJI} Il reste **{total}** membres.")
 
-        if before.channel and before.channel != after.channel:
-            channel = before.channel
-            if channel.name.startswith("🎙️") and len(channel.members) == 0:
-                await channel.delete()
-    except Exception as e:
-        print(f"Erreur voc temporaire : {e}")
+# === Commandes de test bienvenue / au revoir ===
+@bot.command(name="testwelcome")
+@commands.has_permissions(manage_guild=True)
+async def test_welcome(ctx):
+    gid = ctx.guild.id
+    total = ctx.guild.member_count
 
-# === Run sécurisé pour Render ===
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    embed_id = get_conf(gid, "welcome_embed_channel")
+    if embed_id:
+        ch = bot.get_channel(embed_id)
+        if ch:
+            e = discord.Embed(title="🌿 Bienvenue (test)", description=f"{ctx.author.mention} a rejoint le serveur.", color=discord.Color.green())
+            e.set_footer(text=f"Tu es le {total}ᵉ membre !")
+            await ch.send(embed=e)
 
-if not TOKEN or TOKEN.strip() == "":
-    print("❌ Le token Discord est vide ou non défini. Vérifie les variables d’environnement sur Render.")
-    while True:
-        pass
-else:
-    try:
-        print("✅ Lancement du bot avec le token depuis Render.")
-        bot.run(TOKEN)
-    except Exception as e:
-        print(f"❌ Erreur lors du lancement du bot : {e}")
-        while True:
-            pass
+    text_id = get_conf(gid, "welcome_text_channel")
+    if text_id:
+        ch = bot.get_channel(text_id)
+        if ch:
+            await ch.send(f"{EMOJI} Bienvenue {ctx.author.mention} sur le serveur !\n{EMOJI} Tu es le **{total}ᵉ** membre !")
+
+    await ctx.send("✅ Test de bienvenue envoyé.")
+
+@bot.command(name="testleave")
+@commands.has_permissions(manage_guild=True)
+async def test_leave(ctx):
+    gid = ctx.guild.id
+    total = ctx.guild.member_count
+
+    embed_id = get_conf(gid, "leave_embed_channel")
+    if embed_id:
+        ch = bot.get_channel(embed_id)
+        if ch:
+            e = discord.Embed(title="👋 Au revoir (test)",
