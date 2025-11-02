@@ -213,6 +213,4 @@ async def on_voice_state_update(member, before, after):
 
         if before.channel and before.channel != after.channel:
             channel = before.channel
-            if channel.name.startswith("🎙️") and len(channel.members) == 0:
-                await channel.delete()
-    except Exception as e
+            if channel.name.startswith("🎙️
