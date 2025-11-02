@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ✅ Hoshikuzu_config.py — version complète avec config, bienvenue, au revoir, et sécurité Render
+# ✅ Hoshikuzu_config.py — version complète avec config, bienvenue, voc temporaire, et sécurité Render
 
 import os, json, threading, http.server, socketserver, traceback
 import discord
@@ -53,6 +53,7 @@ def get_gconf(gid):
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.voice_states = True
 bot = commands.Bot(command_prefix="+", intents=intents, help_command=None)
 EMOJI = "<a:caarrow:1433143710094196997>"
 
@@ -62,7 +63,7 @@ async def help_cmd(ctx):
     e = discord.Embed(title="🌿 Hoshikuzu — Config", color=discord.Color.green())
     e.add_field(name="Config", value="`+config` panneau interactif", inline=False)
     e.add_field(name="Liens", value="`+allowlink #channel` / `+disallowlink #channel`", inline=False)
-    e.add_field(name="Vocale", value="`+createvoc`", inline=False)
+    e.add_field(name="Vocale", value="`🔊Créer un voc` automatique", inline=False)
     e.add_field(name="Lock", value="`+lock` / `+unlock`", inline=False)
     e.add_field(name="Roles", value="`+role @user @role` / `+rolejoin @role`", inline=False)
     e.add_field(name="Tickets", value="`+ticket`", inline=False)
@@ -159,12 +160,15 @@ async def on_member_join(member):
             )
             embed.set_footer(text=f"Tu es le {total}ᵉ membre !")
             await channel.send(embed=embed)
-            await channel.send(
-                f"{EMOJI} Bienvenue {member.mention} sur le serveur !\n"
-                f"{EMOJI} Tu es le **{total}ᵉ** membre !"
-            )
 
 @bot.event
 async def on_member_remove(member):
     guild_id = member.guild.id
-    channel_id = get_conf(guild
+    channel_id = get_conf(guild_id, "leave_channel")
+    if channel_id:
+        channel = bot.get_channel(channel_id)
+        if channel:
+            total = member.guild.member_count
+            embed = discord.Embed(
+                title="👋 Au revoir !",
+                description
