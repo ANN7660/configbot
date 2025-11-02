@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# ✅ Hoshikuzu_config.py — version complète et corrigée
-
 import os, json, threading, http.server, socketserver, traceback
 import discord
 from discord.ext import commands
@@ -57,6 +55,10 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="+", intents=intents, help_command=None)
 EMOJI = "<a:caarrow:1433143710094196997>"
 
+@bot.event
+async def on_ready():
+    print(f"✅ Connecté comme {bot.user}")
+
 # === Help Command ===
 @bot.command(name="help")
 async def help_cmd(ctx):
@@ -68,6 +70,23 @@ async def help_cmd(ctx):
     e.add_field(name="Roles", value="`+role @user @role` / `+rolejoin @role`", inline=False)
     e.add_field(name="Tickets", value="`+ticket`", inline=False)
     await ctx.send(embed=e)
+
+# === Commande +config ===
+@bot.command(name="config")
+@commands.has_permissions(manage_guild=True)
+async def config_cmd(ctx):
+    try:
+        conf = get_gconf(ctx.guild.id)
+        e = discord.Embed(title="⚙️ Panneau de configuration — Hoshikuzu", color=discord.Color.green())
+        e.add_field(name="Logs", value=f"<#{conf.get('logs_channel')}>" if conf.get("logs_channel") else "Aucun", inline=True)
+        e.add_field(name="Bienvenue", value=f"<#{conf.get('welcome_channel')}>" if conf.get("welcome_channel") else "Aucun", inline=True)
+        e.add_field(name="Au revoir", value=f"<#{conf.get('leave_channel')}>" if conf.get("leave_channel") else "Aucun", inline=True)
+        e.add_field(name="Invites", value=f"<#{conf.get('invites_channel')}>" if conf.get("invites_channel") else "Aucun", inline=True)
+        e.add_field(name="Rolejoin", value=f"<@&{conf.get('auto_role')}>" if conf.get("auto_role") else "Aucun", inline=True)
+        await ctx.send(embed=e)
+    except Exception as e:
+        traceback.print_exc()
+        await ctx.send(f"❌ Erreur : `{type(e).__name__}` — {e}")
 
 # === Messages de bienvenue et au revoir ===
 @bot.event
@@ -108,7 +127,6 @@ VOC_TRIGGER_NAME = "🔊Créer un voc"
 @bot.event
 async def on_voice_state_update(member, before, after):
     try:
-        # Si le membre rejoint le salon déclencheur
         if after.channel and after.channel.name == VOC_TRIGGER_NAME:
             guild = member.guild
             category = after.channel.category
@@ -119,7 +137,6 @@ async def on_voice_state_update(member, before, after):
             )
             await member.move_to(temp_channel)
 
-        # Si le membre quitte un salon vocal
         if before.channel and before.channel != after.channel:
             channel = before.channel
             if channel.name.startswith("🎙️") and len(channel.members) == 0:
@@ -142,3 +159,4 @@ else:
         print(f"❌ Erreur lors du lancement du bot : {e}")
         while True:
             pass
+
