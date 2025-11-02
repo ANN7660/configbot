@@ -59,10 +59,10 @@ EMOJI = "<a:caarrow:1433143710094196997>"
 async def on_ready():
     print(f"✅ Connecté comme {bot.user}")
 
-# === Help Command ===
+# === Commandes ===
 @bot.command(name="help")
 async def help_cmd(ctx):
-    e = discord.Embed(title="🌿 Hoshikuzu — Config", color=discord.Color.green())
+    e = discord.Embed(title="🌿 Hoshikuzu — Commandes", color=discord.Color.green())
     e.add_field(name="Config", value="`+config` panneau interactif", inline=False)
     e.add_field(name="Liens", value="`+allowlink #channel` / `+disallowlink #channel`", inline=False)
     e.add_field(name="Vocale", value="`🔊Créer un voc` automatique", inline=False)
@@ -71,6 +71,69 @@ async def help_cmd(ctx):
     e.add_field(name="Tickets", value="`+ticket`", inline=False)
     await ctx.send(embed=e)
 
+@bot.command(name="lock")
+@commands.has_permissions(manage_channels=True)
+async def lock(ctx):
+    overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
+    overwrite.send_messages = False
+    await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+    await ctx.send("🔒 Salon verrouillé.")
+
+@bot.command(name="unlock")
+@commands.has_permissions(manage_channels=True)
+async def unlock(ctx):
+    overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
+    overwrite.send_messages = True
+    await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+    await ctx.send("🔓 Salon déverrouillé.")
+
+@bot.command(name="role")
+@commands.has_permissions(manage_roles=True)
+async def role(ctx, member: discord.Member, role: discord.Role):
+    if role in member.roles:
+        await member.remove_roles(role)
+        await ctx.send(f"❌ {role.name} retiré de {member.mention}")
+    else:
+        await member.add_roles(role)
+        await ctx.send(f"✅ {role.name} ajouté à {member.mention}")
+
+@bot.command(name="rolejoin")
+@commands.has_permissions(manage_roles=True)
+async def rolejoin(ctx, role: discord.Role):
+    set_conf(ctx.guild.id, "auto_role", role.id)
+    await ctx.send(f"✅ Rôle d’arrivée défini : {role.name}")
+
+@bot.command(name="ticket")
+async def ticket(ctx):
+    overwrites = {
+        ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        ctx.guild.me: discord.PermissionOverwrite(read_messages=True)
+    }
+    channel = await ctx.guild.create_text_channel(name=f"ticket-{ctx.author.name}", overwrites=overwrites)
+    await channel.send(f"{ctx.author.mention} 🎫 Ton ticket est ouvert ici.")
+
+@bot.command(name="allowlink")
+@commands.has_permissions(manage_guild=True)
+async def allowlink(ctx, channel: discord.TextChannel):
+    links = get_conf(ctx.guild.id, "allow_links", [])
+    if channel.id not in links:
+        links.append(channel.id)
+        set_conf(ctx.guild.id, "allow_links", links)
+        await ctx.send(f"✅ Liens autorisés dans {channel.mention}")
+    else:
+        await ctx.send(f"ℹ️ Les liens sont déjà autorisés ici.")
+
+@bot.command(name="disallowlink")
+@commands.has_permissions(manage_guild=True)
+async def disallowlink(ctx, channel: discord.TextChannel):
+    links = get_conf(ctx.guild.id, "allow_links", [])
+    if channel.id in links:
+        links.remove(channel.id)
+        set_conf(ctx.guild.id, "allow_links", links)
+        await ctx.send(f"❌ Liens désactivés dans {channel.mention}")
+    else:
+        await ctx.send(f"ℹ️ Les liens étaient déjà désactivés ici.")
 # === Config View ===
 class ConfigView(discord.ui.View):
     def __init__(self, guild, author_id, timeout=180):
@@ -128,7 +191,6 @@ class ConfigView(discord.ui.View):
             traceback.print_exc()
             await interaction.response.send_message(f"Erreur : {e}", ephemeral=True)
 
-# === Commande +config ===
 @bot.command(name="config")
 @commands.has_permissions(manage_guild=True)
 async def config_cmd(ctx):
@@ -169,5 +231,63 @@ async def on_member_join(member):
                 f"{EMOJI} Tu es le **{total}ᵉ** membre !"
             )
 
+            auto_role_id = get_conf(guild_id, "auto_role")
+            if auto_role_id:
+                role = member.guild.get_role(auto_role_id)
+                if role:
+                    await member.add_roles(role)
+
 @bot.event
-async def on_member
+async def on_member_remove(member):
+    guild_id = member.guild.id
+    channel_id = get_conf(guild_id, "leave_channel")
+    if channel_id:
+        channel = bot.get_channel(channel_id)
+        if channel:
+            total = member.guild.member_count
+            embed = discord.Embed(
+                title="👋 Au revoir !",
+                description=f"{member.name} a quitté le serveur.",
+                color=discord.Color.red()
+            )
+            embed.set_footer(text=f"Il reste {total} membres.")
+            await channel.send(embed=embed)
+
+# === Salon vocal temporaire ===
+VOC_TRIGGER_NAME = "🔊Créer un voc"
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    try:
+        if after.channel and after.channel.name == VOC_TRIGGER_NAME:
+            guild = member.guild
+            category = after.channel.category
+            temp_channel = await guild.create_voice_channel(
+                name=f"🎙️ {member.name}",
+                category=category,
+                user_limit=1
+            )
+            await member.move_to(temp_channel)
+
+        if before.channel and before.channel != after.channel:
+            channel = before.channel
+            if channel.name.startswith("🎙️") and len(channel.members) == 0:
+                await channel.delete()
+    except Exception as e:
+        print(f"Erreur voc temporaire : {e}")
+
+# === Run sécurisé pour Render ===
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
+if not TOKEN or TOKEN.strip() == "":
+    print("❌ Le token Discord est vide ou non défini. Vérifie les variables d’environnement sur Render.")
+    while True:
+        pass
+else:
+    try:
+        print("✅ Lancement du bot avec le token depuis Render.")
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"❌ Erreur lors du lancement du bot : {e}")
+        while True:
+            pass
