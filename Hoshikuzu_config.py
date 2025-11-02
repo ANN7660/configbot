@@ -196,4 +196,6 @@ async def test_leave(ctx):
     await ctx.send("✅ Test d’au revoir envoyé.")
 
 # === Salon vocal temporaire ===
-VOC_TRIGGER_NAME = "🔊Créer un
+VOC_TRIGGER_NAME = "🔊Créer un voc"
+
+@bot
