@@ -58,6 +58,7 @@ EMOJI = "<a:caarrow:1433143710094196997>"
 @bot.event
 async def on_ready():
     print(f"✅ Connecté comme {bot.user}")
+
 # === Commandes Utiles ===
 @bot.command(name="help")
 async def help_cmd(ctx):
@@ -155,25 +156,33 @@ class ConfigView(discord.ui.View):
         return interaction.user.id == self.author_id or interaction.user.guild_permissions.manage_guild
 
     async def on_interaction(self, interaction: discord.Interaction):
-        cid = interaction.data.get("custom_id")
-        val = int(interaction.data["values"][0])
-        gid = self.guild.id
+        try:
+            cid = interaction.data.get("custom_id")
+            if "values" not in interaction.data or not interaction.data["values"]:
+                await interaction.response.send_message("❌ Aucune valeur sélectionnée.", ephemeral=True)
+                return
 
-        if cid == "logs":
-            set_conf(gid, "logs_channel", val)
-            await interaction.response.send_message(f"✅ Salon logs défini : <#{val}>", ephemeral=True)
-        elif cid == "welcome_embed":
-            set_conf(gid, "welcome_embed_channel", val)
-            await interaction.response.send_message(f"✅ Salon embed bienvenue défini : <#{val}>", ephemeral=True)
-        elif cid == "welcome_text":
-            set_conf(gid, "welcome_text_channel", val)
-            await interaction.response.send_message(f"✅ Salon texte bienvenue défini : <#{val}>", ephemeral=True)
-        elif cid == "leave_embed":
-            set_conf(gid, "leave_embed_channel", val)
-            await interaction.response.send_message(f"✅ Salon embed au revoir défini : <#{val}>", ephemeral=True)
-        elif cid == "leave_text":
-            set_conf(gid, "leave_text_channel", val)
-            await interaction.response.send_message(f"✅ Salon texte au revoir défini : <#{val}>", ephemeral=True)
+            val = int(interaction.data["values"][0])
+            gid = self.guild.id
+
+            if cid == "logs":
+                set_conf(gid, "logs_channel", val)
+                await interaction.response.send_message(f"✅ Salon logs défini : <#{val}>", ephemeral=True)
+            elif cid == "welcome_embed":
+                set_conf(gid, "welcome_embed_channel", val)
+                await interaction.response.send_message(f"✅ Salon embed bienvenue défini : <#{val}>", ephemeral=True)
+            elif cid == "welcome_text":
+                set_conf(gid, "welcome_text_channel", val)
+                await interaction.response.send_message(f"✅ Salon texte bienvenue défini : <#{val}>", ephemeral=True)
+            elif cid == "leave_embed":
+                set_conf(gid, "leave_embed_channel", val)
+                await interaction.response.send_message(f"✅ Salon embed au revoir défini : <#{val}>", ephemeral=True)
+            elif cid == "leave_text":
+                set_conf(gid, "leave_text_channel", val)
+                await interaction.response.send_message(f"✅ Salon texte au revoir défini : <#{val}>", ephemeral=True)
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(f"❌ Erreur : {type(e).__name__} — {e}", ephemeral=True)
 
 @bot.command(name="config")
 @commands.has_permissions(manage_guild=True)
@@ -231,6 +240,7 @@ async def on_member_remove(member):
         ch = bot.get_channel(text_id)
         if ch:
             await ch.send(f"{EMOJI} {member.name} a quitté le serveur.\n{EMOJI} Il reste **{total}** membres.")
+
 # === Commandes de test bienvenue / au revoir ===
 @bot.command(name="testwelcome")
 @commands.has_permissions(manage_guild=True)
