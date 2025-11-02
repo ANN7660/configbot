@@ -158,11 +158,12 @@ class ConfigView(discord.ui.View):
     async def on_interaction(self, interaction: discord.Interaction):
         try:
             cid = interaction.data.get("custom_id")
-            if "values" not in interaction.data or not interaction.data["values"]:
-                await interaction.response.send_message("❌ Aucune valeur sélectionnée.", ephemeral=True)
+            values = interaction.data.get("values")
+            if not values:
+                await interaction.response.send_message("❌ Aucune sélection détectée.", ephemeral=True)
                 return
 
-            val = int(interaction.data["values"][0])
+            val = int(values[0])
             gid = self.guild.id
 
             if cid == "logs":
@@ -182,7 +183,10 @@ class ConfigView(discord.ui.View):
                 await interaction.response.send_message(f"✅ Salon texte au revoir défini : <#{val}>", ephemeral=True)
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(f"❌ Erreur : {type(e).__name__} — {e}", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Erreur : {type(e).__name__} — {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Erreur : {type(e).__name__} — {e}", ephemeral=True)
 
 @bot.command(name="config")
 @commands.has_permissions(manage_guild=True)
@@ -322,12 +326,3 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN or TOKEN.strip() == "":
     print("❌ Le token Discord est vide ou non défini. Vérifie les variables d’environnement sur Render.")
     while True:
-        pass
-else:
-    try:
-        print("✅ Lancement du bot avec le token depuis Render.")
-        bot.run(TOKEN)
-    except Exception as e:
-        print(f"❌ Erreur lors du lancement du bot : {e}")
-        while True:
-            pass
