@@ -103,7 +103,7 @@ async def role(ctx, member: discord.Member, role: discord.Role):
 @commands.has_permissions(manage_roles=True)
 async def rolejoin(ctx, role: discord.Role):
     set_conf(ctx.guild.id, "auto_role", role.id)
-    await ctx.send(f"✅ Rôle d’arrivée défini : {role.name}")
+    await ctx.send(f"✅ Rôle d'arrivée défini : {role.name}")
 
 @bot.command(name="ticket")
 async def ticket(ctx):
@@ -193,7 +193,7 @@ async def test_welcome(ctx):
 @commands.has_permissions(manage_guild=True)
 async def test_leave(ctx):
     await on_member_remove(ctx.author)
-    await ctx.send("✅ Test d’au revoir envoyé.")
+    await ctx.send("✅ Test d'au revoir envoyé.")
 
 # === Salon vocal temporaire ===
 VOC_TRIGGER_NAME = "🔊Créer un voc"
@@ -204,3 +204,35 @@ async def on_voice_state_update(member, before, after):
         if after.channel and after.channel.name == VOC_TRIGGER_NAME:
             guild = member.guild
             category = after.channel.category
+            
+            # Créer un salon vocal temporaire
+            temp_channel = await guild.create_voice_channel(
+                name=f"Voc de {member.display_name}",
+                category=category
+            )
+            
+            # Déplacer le membre
+            await member.move_to(temp_channel)
+            
+            # Sauvegarder l'info du salon temporaire
+            data.setdefault("temp_vocs", {})[str(temp_channel.id)] = member.id
+            save_data(data)
+        
+        # Supprimer les salons vides
+        if before.channel and before.channel.id != after.channel.id if after.channel else True:
+            temp_vocs = data.get("temp_vocs", {})
+            if str(before.channel.id) in temp_vocs and len(before.channel.members) == 0:
+                await before.channel.delete()
+                del temp_vocs[str(before.channel.id)]
+                save_data(data)
+    
+    except Exception as e:
+        print(f"Erreur vocal temporaire: {e}")
+
+# === Lancement du bot ===
+if __name__ == "__main__":
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        print("❌ DISCORD_TOKEN manquant !")
+    else:
+        bot.run(token)
