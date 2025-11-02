@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# ✅ Hoshikuzu_config.py — version complète avec messages de bienvenue et d’au revoir
+# ✅ Hoshikuzu_config.py — version complète avec config, bienvenue, au revoir, et sécurité Render
 
 import os, json, threading, http.server, socketserver, traceback
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
-load_dotenv()
-
 
 # === Keep Alive (Render) ===
 def keep_alive():
@@ -170,36 +167,4 @@ async def on_member_join(member):
 @bot.event
 async def on_member_remove(member):
     guild_id = member.guild.id
-    channel_id = get_conf(guild_id, "leave_channel")
-    if channel_id:
-        channel = bot.get_channel(channel_id)
-        if channel:
-            total = member.guild.member_count
-            embed = discord.Embed(
-                title="👋 Au revoir !",
-                description=f"{member.name} a quitté le serveur.",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text=f"Il reste {total} membres.")
-            await channel.send(embed=embed)
-            await channel.send(
-                f"{EMOJI} {member.name} nous a quittés.\n"
-                f"{EMOJI} Il reste **{total}** membres sur le serveur."
-            )
-
-# === Run sécurisé ===
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-print(f"TOKEN: {TOKEN!r}")  # Pour debug
-
-if not TOKEN or TOKEN.strip() == "":
-    print("❌ DISCORD_BOT_TOKEN non défini ou vide.")
-    while True:
-        pass
-else:
-    try:
-        bot.run(TOKEN)
-    except Exception as e:
-        print(f"❌ Erreur lors du lancement du bot : {e}")
-        while True:
-            pass
-
+    channel_id = get_conf(guild
