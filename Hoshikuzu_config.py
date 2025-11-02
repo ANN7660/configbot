@@ -54,13 +54,29 @@ async def on_ready():
 @bot.command(name="help")
 async def help_cmd(ctx):
     e = discord.Embed(title="🌿 Commandes Hoshikuzu", color=discord.Color.green())
-    e.add_field(name="Config", value="`+config`", inline=False)
-    e.add_field(name="Liens", value="`+allowlink #channel` / `+disallowlink #channel`", inline=False)
-    e.add_field(name="Vocale", value="Créer un voc automatique", inline=False)
-    e.add_field(name="Lock", value="`+lock` / `+unlock`", inline=False)
-    e.add_field(name="Roles", value="`+role @user @role` / `+rolejoin @role`", inline=False)
-    e.add_field(name="Tickets", value="`+ticket`", inline=False)
-    e.add_field(name="Tests", value="`+testwelcome` / `+testleave`", inline=False)
+    e.add_field(name="📊 Configuration", value=(
+        "`+config` - Voir la config actuelle\n"
+        "`+setwelcome #channel <embed/text>` - Salon de bienvenue\n"
+        "`+setleave #channel <embed/text>` - Salon d'au revoir\n"
+        "`+setlogs #channel` - Salon de logs"
+    ), inline=False)
+    e.add_field(name="🔗 Liens", value=(
+        "`+allowlink #channel` - Autoriser les liens\n"
+        "`+disallowlink #channel` - Bloquer les liens"
+    ), inline=False)
+    e.add_field(name="🔒 Modération", value=(
+        "`+lock` - Verrouiller le salon\n"
+        "`+unlock` - Déverrouiller le salon"
+    ), inline=False)
+    e.add_field(name="👤 Rôles", value=(
+        "`+role @user @role` - Ajouter/retirer un rôle\n"
+        "`+rolejoin @role` - Rôle auto à l'arrivée"
+    ), inline=False)
+    e.add_field(name="🎫 Tickets", value="`+ticket` - Créer un ticket", inline=False)
+    e.add_field(name="🧪 Tests", value=(
+        "`+testwelcome` - Test bienvenue\n"
+        "`+testleave` - Test au revoir"
+    ), inline=False)
     await ctx.send(embed=e)
 
 @bot.command(name="config")
@@ -72,6 +88,39 @@ async def config_cmd(ctx):
         val = conf.get(key)
         e.add_field(name=key.replace("_channel", "").replace("_", " ").title(), value=f"<#{val}>" if val else "Aucun", inline=False)
     await ctx.send(embed=e)
+
+@bot.command(name="setwelcome")
+@commands.has_permissions(manage_guild=True)
+async def set_welcome(ctx, channel: discord.TextChannel, type: str = "embed"):
+    """Configure le salon de bienvenue. Type: embed ou text"""
+    if type.lower() == "embed":
+        set_conf(ctx.guild.id, "welcome_embed_channel", channel.id)
+        await ctx.send(f"✅ Messages de bienvenue (embed) définis dans {channel.mention}")
+    elif type.lower() == "text":
+        set_conf(ctx.guild.id, "welcome_text_channel", channel.id)
+        await ctx.send(f"✅ Messages de bienvenue (texte) définis dans {channel.mention}")
+    else:
+        await ctx.send("❌ Type invalide ! Utilise `embed` ou `text`")
+
+@bot.command(name="setleave")
+@commands.has_permissions(manage_guild=True)
+async def set_leave(ctx, channel: discord.TextChannel, type: str = "embed"):
+    """Configure le salon d'au revoir. Type: embed ou text"""
+    if type.lower() == "embed":
+        set_conf(ctx.guild.id, "leave_embed_channel", channel.id)
+        await ctx.send(f"✅ Messages d'au revoir (embed) définis dans {channel.mention}")
+    elif type.lower() == "text":
+        set_conf(ctx.guild.id, "leave_text_channel", channel.id)
+        await ctx.send(f"✅ Messages d'au revoir (texte) définis dans {channel.mention}")
+    else:
+        await ctx.send("❌ Type invalide ! Utilise `embed` ou `text`")
+
+@bot.command(name="setlogs")
+@commands.has_permissions(manage_guild=True)
+async def set_logs(ctx, channel: discord.TextChannel):
+    """Configure le salon des logs"""
+    set_conf(ctx.guild.id, "logs_channel", channel.id)
+    await ctx.send(f"✅ Salon de logs défini : {channel.mention}")
 
 @bot.command(name="lock")
 @commands.has_permissions(manage_channels=True)
@@ -155,7 +204,7 @@ async def on_member_join(member):
     if text_id:
         ch = bot.get_channel(text_id)
         if ch:
-            await ch.send(f"{EMOJI} Bienvenue {member.mention} ! Tu es le **{total}ᵉ** membre !")
+            await ch.send(f"{EMOJI} Bienvenue {member.mention} sur **Hoshikuzu** !\n{EMOJI} Tu es le **{total}ᵉ** membre !")
 
     role_id = get_conf(gid, "auto_role")
     if role_id:
@@ -234,5 +283,9 @@ if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
         print("❌ DISCORD_TOKEN manquant !")
+        print("ℹ️  Configure la variable d'environnement DISCORD_TOKEN sur Render")
+        print("ℹ️  Variables disponibles:", list(os.environ.keys())[:10])
+        exit(1)
     else:
+        print(f"✅ Token trouvé, démarrage du bot...")
         bot.run(token)
