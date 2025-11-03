@@ -367,16 +367,16 @@ async def on_member_join(member):
             invite_count = data["user_invites"][gid][user_id]
             save_data(data)
             
-            # Log d'invitation
-            inv_channel_id = get_conf(guild.id, "invitation_channel")
-            if inv_channel_id:
-                inv_channel = guild.get_channel(inv_channel_id)
-                if inv_channel:
-                    e = discord.Embed(title="🎉 Nouvelle invitation", color=discord.Color.gold())
-                    e.add_field(name="Nouveau membre", value=member.mention, inline=True)
-                    e.add_field(name="Invité par", value=inviter.mention, inline=True)
-                    e.add_field(name="Total invitations", value=f"**{invite_count}**", inline=False)
-                    await inv_channel.send(embed=e)
+           # Log d'invitation (message texte)
+inv_channel_id = get_conf(guild.id, "invitation_channel")
+if inv_channel_id:
+    inv_channel = guild.get_channel(inv_channel_id)
+    if inv_channel:
+        await inv_channel.send(
+            f"🎉 {member.mention} a rejoint le serveur. "
+            f"Il a été invité par {inviter.mention}, qui a maintenant **{invite_count}** invitation(s) !"
+        )
+
             
             # Vérifier les rôles à attribuer
             roles_invites = data.get("roles_invites", {}).get(gid, {})
