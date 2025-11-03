@@ -78,7 +78,7 @@ async def help_cmd(ctx):
     e.add_field(name="👤 Rôles", value="`+role @user @role` - Ajouter/retirer un rôle\n`+rolejoin @role` - Rôle auto à l'arrivée", inline=False)
     e.add_field(name="🎫 Tickets", value="`+ticket` - Créer un ticket\n`+ticketpanel` - Crée un panel de tickets\n`+close` - Fermer un ticket", inline=False)
     e.add_field(name="🧪 Tests", value="`+testwelcome` - Test bienvenue\n`+testleave` - Test au revoir", inline=False)
-    e.add_field(name="🔊 Vocaux", value="`+createvoc` - Créer un salon vocal temporaire\n`+setupvoc #channel` - Configurer le salon vocal trigger", inline=False)
+    e.add_field(name="🔊 Vocaux", value="`+createvoc` - Créer un salon vocal trigger\n`+setupvoc #channel` - Configurer un vocal existant comme trigger", inline=False)
     await ctx.send(embed=e)
 
 # === Config ===
@@ -440,26 +440,21 @@ async def setup_voc(ctx, channel: discord.VoiceChannel):
     await ctx.send(f"✅ Salon vocal trigger configuré : {channel.mention}\nLes membres qui rejoindront ce salon auront leur propre vocal temporaire.")
 
 @bot.command(name="createvoc")
+@commands.has_permissions(manage_guild=True)
 async def create_voc(ctx):
-    """Créer un salon vocal temporaire manuel"""
+    """Créer un salon vocal trigger pour les vocaux temporaires"""
     category = ctx.channel.category
-    voc = await ctx.guild.create_voice_channel(
-        name=f"🔊 Vocal de {ctx.author.display_name}",
+    
+    # Créer le salon trigger
+    voc_trigger = await ctx.guild.create_voice_channel(
+        name=VOC_TRIGGER_NAME,
         category=category
     )
     
-    gid = str(ctx.guild.id)
-    data.setdefault("temp_vocs", {})[str(voc.id)] = {
-        "owner": ctx.author.id,
-        "created_at": datetime.datetime.utcnow().isoformat()
-    }
-    save_data(data)
+    # Sauvegarder comme salon trigger
+    set_conf(ctx.guild.id, "voc_trigger_channel", voc_trigger.id)
     
-    await ctx.send(f"✅ Salon vocal créé : {voc.mention}")
-    
-    # Déplacer l'utilisateur s'il est en vocal
-    if ctx.author.voice:
-        await ctx.author.move_to(voc)
+    await ctx.send(f"✅ Salon vocal trigger créé : {voc_trigger.mention}\n💡 Quand quelqu'un rejoint ce salon, un vocal temporaire lui sera créé automatiquement !")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -575,7 +570,6 @@ async def on_raw_reaction_add(payload):
         embed = discord.Embed(title="🎫 Ticket créé !", description=f"{member.mention}, explique ton problème ici.", color=discord.Color.green())
         await ticket_channel.send(embed=embed, view=TicketView())
 
-# === Run ===
 # === Run ===
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
