@@ -576,6 +576,18 @@ async def on_raw_reaction_add(payload):
         await ticket_channel.send(embed=embed, view=TicketView())
 
 # === Run ===
+# === Run ===
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
+        print("❌ ERREUR: La variable d'environnement DISCORD_TOKEN n'est pas définie!")
+        print("💡 Configure-la dans les Environment Variables de Render")
+        exit(1)
+    
+    print("🚀 Démarrage du bot Hoshikuzu...")
+    try:
+        bot.run(token)
+    except discord.LoginFailure:
+        print("❌ Token Discord invalide!")
+    except Exception as e:
+        print(f"❌ Erreur lors du démarrage: {e}")
