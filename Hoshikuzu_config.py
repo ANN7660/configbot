@@ -276,7 +276,7 @@ async def test_leave(ctx):
     # Test text
     text_channel_id = get_conf(ctx.guild.id, "leave_text_channel")
     if text_channel_id:
-        channel = ctx.guild.get_channel(text_channel_id)
+        channel = guild.get_channel(text_channel_id)
         if channel:
             await channel.send(f"😢 **{ctx.author.display_name}** a quitté le serveur. (TEST)")
     
@@ -307,22 +307,23 @@ async def invites_cmd(ctx, member: discord.Member = None):
     e.set_thumbnail(url=member.display_avatar.url)
     await ctx.send(embed=e)
 
+# === ÉVÉNEMENT MEMBRE REJOINT (CORRIGÉ) ===
 @bot.event
 async def on_member_join(member):
     guild = member.guild
     gid = str(guild.id)
     
-    # Rôle automatique
+    # === 1. RÔLE AUTOMATIQUE ===
     auto_role_id = get_conf(guild.id, "auto_role")
     if auto_role_id:
         role = guild.get_role(auto_role_id)
         if role:
             try:
                 await member.add_roles(role)
-            except:
-                pass
+            except Exception as e:
+                print(f"Erreur ajout rôle auto: {e}")
     
-    # Messages de bienvenue - Embed
+    # === 2. MESSAGES DE BIENVENUE - EMBED ===
     embed_channel_id = get_conf(guild.id, "welcome_embed_channel")
     if embed_channel_id:
         channel = guild.get_channel(embed_channel_id)
@@ -336,19 +337,24 @@ async def on_member_join(member):
             e.set_footer(text=f"Nous sommes maintenant {guild.member_count} membres !")
             await channel.send(embed=e)
     
-    # Messages de bienvenue - Text
+    # === 3. MESSAGES DE BIENVENUE - TEXTE ===
     text_channel_id = get_conf(guild.id, "welcome_text_channel")
     if text_channel_id:
         channel = guild.get_channel(text_channel_id)
         if channel:
-            await channel.send(f"<a:caarrow:1433143710094196997> Bienvenue {member.mention} sur **Hoshikuzu**\n<a:caarrow:1433143710094196997> Nous sommes maintenant **{guild.member_count}** membres sur le serveur !")
+            await channel.send(
+                f"<a:caarrow:1433143710094196997> Bienvenue {member.mention} sur **Hoshikuzu**\n"
+                f"<a:caarrow:1433143710094196997> Nous sommes maintenant **{guild.member_count}** membres sur le serveur !"
+            )
     
-    # Trouver qui a invité
+    # === 4. SYSTÈME DE TRACKING DES INVITATIONS ===
     try:
+        # Récupérer les nouvelles invitations
         new_invites = {inv.code: inv.uses for inv in await guild.invites()}
         old_invites = data.get("invites", {}).get(gid, {})
         
         inviter = None
+        # Trouver quelle invitation a été utilisée
         for code, uses in new_invites.items():
             if old_invites.get(code, 0) < uses:
                 inviter_inv = discord.utils.get(await guild.invites(), code=code)
@@ -356,49 +362,53 @@ async def on_member_join(member):
                     inviter = inviter_inv.inviter
                 break
         
-        # Mettre à jour les invitations
+        # Mettre à jour le cache des invitations
         data["invites"][gid] = new_invites
+        save_data(data)
         
-        # Incrémenter le compteur de l'inviteur
+        # Si on a trouvé l'inviteur
         if inviter:
+            # Incrémenter son compteur d'invitations
             data.setdefault("user_invites", {}).setdefault(gid, {})
             user_id = str(inviter.id)
             data["user_invites"][gid][user_id] = data["user_invites"][gid].get(user_id, 0) + 1
             invite_count = data["user_invites"][gid][user_id]
             save_data(data)
-try:
-    inv_channel_id = get_conf(guild.id, "invitation_channel")
-    if inv_channel_id:
-        inv_channel = guild.get_channel(inv_channel_id)
-        if inv_channel:
-            await inv_channel.send(
-                f"🎉 {member.mention} a rejoint le serveur. "
-                f"Il a été invité par {inviter.mention}, qui a maintenant **{invite_count}** invitation(s) !"
-            )
-except Exception as e:
-    print(f"Erreur tracking invitation: {e}")
-
-
-
             
-            # Vérifier les rôles à attribuer
+            # Envoyer un message dans le salon d'invitations
+            try:
+                inv_channel_id = get_conf(guild.id, "invitation_channel")
+                if inv_channel_id:
+                    inv_channel = guild.get_channel(inv_channel_id)
+                    if inv_channel:
+                        await inv_channel.send(
+                            f"🎉 {member.mention} a rejoint le serveur. "
+                            f"Il a été invité par {inviter.mention}, qui a maintenant **{invite_count}** invitation(s) !"
+                        )
+            except Exception as e:
+                print(f"Erreur envoi message invitation: {e}")
+            
+            # Vérifier et attribuer les rôles selon le nombre d'invitations
             roles_invites = data.get("roles_invites", {}).get(gid, {})
             for count_str, role_id in roles_invites.items():
                 if invite_count >= int(count_str):
                     role = guild.get_role(role_id)
                     if role and role not in inviter.roles:
-                        await inviter.add_roles(role)
+                        try:
+                            await inviter.add_roles(role)
+                            print(f"Rôle {role.name} attribué à {inviter.name} ({invite_count} invitations)")
+                        except Exception as e:
+                            print(f"Erreur attribution rôle: {e}")
         
-        save_data(data)
     except Exception as e:
-        print(f"Erreur tracking invitation: {e}")
+        print(f"Erreur système d'invitations: {e}")
 
+# === ÉVÉNEMENT MEMBRE QUITTE ===
 @bot.event
 async def on_member_remove(member):
     guild = member.guild
     
-    # Messages d'au revoir
-    # Embed
+    # Messages d'au revoir - Embed
     embed_channel_id = get_conf(guild.id, "leave_embed_channel")
     if embed_channel_id:
         channel = guild.get_channel(embed_channel_id)
@@ -411,13 +421,14 @@ async def on_member_remove(member):
             e.set_thumbnail(url=member.display_avatar.url)
             await channel.send(embed=e)
     
-    # Text
+    # Messages d'au revoir - Text
     text_channel_id = get_conf(guild.id, "leave_text_channel")
     if text_channel_id:
         channel = guild.get_channel(text_channel_id)
         if channel:
             await channel.send(f"😢 **{member.display_name}** a quitté le serveur.")
 
+# === ÉVÉNEMENTS INVITATIONS ===
 @bot.event
 async def on_invite_create(invite):
     """Mettre à jour le cache quand une invitation est créée"""
