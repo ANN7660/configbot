@@ -366,16 +366,20 @@ async def on_member_join(member):
             data["user_invites"][gid][user_id] = data["user_invites"][gid].get(user_id, 0) + 1
             invite_count = data["user_invites"][gid][user_id]
             save_data(data)
-            
-           # Log d'invitation (message texte)
-inv_channel_id = get_conf(guild.id, "invitation_channel")
-if inv_channel_id:
-    inv_channel = guild.get_channel(inv_channel_id)
-    if inv_channel:
-        await inv_channel.send(
-            f"🎉 {member.mention} a rejoint le serveur. "
-            f"Il a été invité par {inviter.mention}, qui a maintenant **{invite_count}** invitation(s) !"
-        )
+try:
+    # ... ton nouveau code ici ...
+    inv_channel_id = get_conf(guild.id, "invitation_channel")
+    if inv_channel_id:
+        inv_channel = guild.get_channel(inv_channel_id)
+        if inv_channel:
+            await inv_channel.send(
+                f"🎉 {member.mention} a rejoint le serveur. "
+                f"Il a été invité par {inviter.mention}, qui a maintenant **{invite_count}** invitation(s) !"
+            )
+    # ... reste du code ...
+except Exception as e:
+    print(f"Erreur tracking invitation: {e}")
+
 
             
             # Vérifier les rôles à attribuer
