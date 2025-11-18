@@ -78,7 +78,7 @@ async def help_cmd(ctx):
     ), inline=False)
     e.add_field(name="👥 Invitations", value="+roleinvite <nombre> @role\n+invites [@user]", inline=False)
     e.add_field(name="🔗 Liens", value="+allowlink #channel / +disallowlink #channel", inline=False)
-    e.add_field(name="🔒 Modération", value="+lock / +unlock", inline=False)
+    e.add_field(name="🔒 Modération", value="+lock / +unlock / +ban / +unban / +mute / +unmute", inline=False)
     e.add_field(name="👤 Rôles", value="+role @user @role / +rolejoin @role", inline=False)
     e.add_field(name="🎫 Tickets", value="+ticket / +ticketpanel / +close / +ticketrole", inline=False)
     e.add_field(name="🎭 Rôles Réactions", value="+reactionrole / +listreactionroles", inline=False)
@@ -94,6 +94,7 @@ async def send_welcome(member):
     text_ch_id = conf.get("welcome_text_channel")
     total_members = member.guild.member_count
 
+    # Embed welcome
     if embed_ch_id:
         ch = member.guild.get_channel(embed_ch_id)
         if ch:
@@ -105,11 +106,13 @@ async def send_welcome(member):
             )
             e.set_footer(text=f"Nous sommes maintenant {total_members} membres")
             await ch.send(embed=e)
+
+    # Text welcome
     if text_ch_id:
         ch = member.guild.get_channel(text_ch_id)
         if ch:
             msg = (
-                f"{EMOJI} {member.mention} a rejoint le serveur !\n"
+                f"{EMOJI} Bienvenue {member.mention} sur **Hoshikuzu** !\n"
                 f"{EMOJI} Nous sommes maintenant **{total_members} membres**."
             )
             await ch.send(msg)
@@ -120,6 +123,7 @@ async def send_leave(member):
     text_ch_id = conf.get("leave_text_channel")
     total_members = member.guild.member_count
 
+    # Embed leave
     if embed_ch_id:
         ch = member.guild.get_channel(embed_ch_id)
         if ch:
@@ -131,6 +135,8 @@ async def send_leave(member):
             )
             e.set_footer(text=f"Il reste {total_members} membres")
             await ch.send(embed=e)
+
+    # Text leave
     if text_ch_id:
         ch = member.guild.get_channel(text_ch_id)
         if ch:
@@ -332,16 +338,59 @@ async def reactionrole(ctx, channel: discord.TextChannel, emoji, role: discord.R
     save_data(data)
     await ctx.send("✅ Rôle réaction créé")
 
-# ==================== RUN ====================
-if __name__ == "__main__":
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        print("❌ ERREUR: DISCORD_TOKEN non défini")
-        exit(1)
-    print("🚀 Démarrage du bot Hoshikuzu...")
+# ==================== MODERATION ====================
+@bot.command(name="config")
+@commands.has_permissions(administrator=True)
+async def config(ctx, option=None, *, value=None):
+    if option is None:
+        await ctx.send("⚙️ Utilisation: +config <option> <valeur>")
+        return
+    set_conf(ctx.guild.id, option, value)
+    await ctx.send(f"✅ Configuration {option} mise à jour avec la valeur: `{value}`")
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member, *, reason=None):
+    await member.ban(reason=reason)
+    await ctx.send(f"⛔ {member.mention} a été banni ! Raison: {reason if reason else 'Aucune'}")
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def unban(ctx, *, member_str):
+    banned_users = await ctx.guild.bans()
+    member_name, member_discrim = member_str.split("#")
+    for ban_entry in banned_users:
+        user = ban_entry.user
+        if (user.name, user.discriminator) == (member_name, member_discrim):
+            await ctx.guild.unban(user)
+            await ctx.send(f"✅ {user.mention} a été débanni !")
+            return
+    await ctx.send("❌ Membre non trouvé dans la liste des bannis.")
+
+@bot.command(name="mute")
+@commands.has_permissions(moderate_members=True)
+async def mute(ctx, member: discord.Member, duration: str = None):
+    time_multiplier = {"s":1, "m":60, "h":3600, "d":86400}
+    seconds = 0
+    if duration:
+        unit = duration[-1]
+        if unit not in time_multiplier:
+            await ctx.send("❌ Format invalide. Exemple: 10s, 5m, 2h, 1d")
+            return
+        try:
+            seconds = int(duration[:-1]) * time_multiplier[unit]
+        except:
+            await ctx.send("❌ Format invalide.")
+            return
     try:
-        bot.run(token)
-    except discord.LoginFailure:
-        print("❌ Token Discord invalide!")
+        until = datetime.datetime.utcnow() + datetime.timedelta(seconds=seconds)
+        await member.timeout(until, reason=f"Muted par {ctx.author}")
+        await ctx.send(f"🔇 {member.mention} a été mute pour {duration if duration else 'indéfiniment'}.")
     except Exception as e:
-        print(f"❌ Erreur lors du démarrage: {e}")
+        await ctx.send(f"❌ Impossible de mute: {e}")
+
+@bot.command(name="unmute")
+@commands.has_permissions(moderate_members=True)
+async def unmute(ctx, member: discord.Member):
+    try:
+        await member.timeout(None, reason=f"Unmute par
