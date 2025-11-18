@@ -342,23 +342,118 @@ async def on_raw_reaction_add(payload):
     if not member:
         return
 
-    # Système de ticket panel
-    panel_id = get_conf(guild.id, "ticket_panel")
-    if panel_id and payload.message_id == panel_id and str(payload.emoji) == "🎫":
-        existing = discord.utils.get(guild.text_channels, name=f"ticket-{member.name}")
-        if existing:
+    # === Ticket System ===
+
+class CloseTicketButton(Button):
+    def __init__(self):
+        super().__init__(label="🔒 Fermer le ticket", style=discord.ButtonStyle.danger)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.channel.name.startswith("ticket-"):
+            return await interaction.response.send_message("❌ Ce n'est pas un ticket.", ephemeral=True)
+
+        await interaction.channel.send("⏳ Fermeture du ticket dans 5 secondes...")
+        await asyncio.sleep(5)
+
+        # Transcription
+        messages = [f"{m.author}: {m.content}" async for m in interaction.channel.history(limit=None, oldest_first=True)]
+        transcript = "\n".join(messages)
+
+        filename = f"transcript_{interaction.channel.name}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(transcript)
+
+        file = discord.File(filename)
+
+        # Envoi au logs
+        embed = discord.Embed(
+            title="📁 Ticket fermé",
+            description=f"Ticket : **{interaction.channel.name}**\nFermé par : {interaction.user.mention}",
+            color=discord.Color.red()
+        )
+        await send_log(interaction.guild, embed)
+        await send_log(interaction.guild, file)
+
+        # Fermeture
+        await interaction.channel.delete()
+
+
+class TicketView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CloseTicketButton())
+
+
+@bot.command(name="ticketpanel")
+@commands.has_permissions(manage_guild=True)
+async def ticket_panel(ctx):
+    embed = discord.Embed(
+        title="🎫 Ouvrir un ticket",
+        description="Clique sur la réaction 🎫 pour ouvrir un ticket.",
+        color=discord.Color.blue()
+    )
+    msg = await ctx.send(embed=embed)
+    await msg.add_reaction("🎫")
+
+    set_conf(ctx.guild.id, "ticket_panel", msg.id)
+    await ctx.send("✅ Panel de tickets configuré !")
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    # --- On ignore ton ancien système ticket : on remplace ici ---
+    panel_id = get_conf(payload.guild_id, "ticket_panel")
+
+    if payload.message_id != panel_id:
+        return
+    if str(payload.emoji) != "🎫":
+        return
+    if payload.user_id == bot.user.id:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    member = guild.get_member(payload.user_id)
+
+    # Protection anti double ticket
+    for channel in guild.text_channels:
+        if channel.name.startswith("ticket-") and channel.permissions_for(member).read_messages:
+            await member.send("❌ Tu as déjà un ticket ouvert !")
             return
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True)
-        }
+    # Génération ID unique
+    ticket_id = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
+    channel_name = f"ticket-{ticket_id:04}"
 
-        ticket_channel = await guild.create_text_channel(f"ticket-{member.name}", overwrites=overwrites)
-        embed = discord.Embed(title="🎫 Ticket créé !", description=f"{member.mention}, explique ton problème ici.", color=discord.Color.green())
-        await ticket_channel.send(embed=embed, view=TicketView())
-        return
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+
+    ticket_channel = await guild.create_text_channel(channel_name, overwrites=overwrites)
+
+    embed = discord.Embed(
+        title="🎫 Ticket ouvert",
+        description=f"{member.mention}, merci d’expliquer ton problème.\nUn staff va te répondre rapidement.",
+        color=discord.Color.green()
+    )
+
+    await ticket_channel.send(embed=embed, view=TicketView())
+
+    # Log
+    log = discord.Embed(
+        title="📥 Ticket ouvert",
+        description=f"Ticket : **{ticket_channel.name}**\nOuvert par : {member.mention}",
+        color=discord.Color.green()
+    )
+    await send_log(guild, log)
+
+    # Message privé
+    try:
+        await member.send(f"🎫 Ton ticket `{ticket_channel.name}` a été créé sur **{guild.name}**.")
+    except:
+        pass
+
     
     # Système de rôles réactions
     gid = str(guild.id)
