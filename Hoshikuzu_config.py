@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-import os, json, threading, http.server, socketserver, asyncio, datetime, re
+import os
+import json
+import threading
+import http.server
+import socketserver
+import asyncio
+import datetime
+import re
+
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
@@ -12,10 +20,12 @@ def keep_alive():
     with socketserver.TCPServer(("", port), QuietHandler) as httpd:
         print(f"[keep-alive] HTTP running on port {port}")
         httpd.serve_forever()
+
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # ==================== DATA ====================
 DATA_FILE = "hoshikuzu_data.json"
+
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -44,7 +54,6 @@ def get_gconf(gid):
 # ==================== BOT INIT ====================
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="+", intents=intents, help_command=None)
-
 EMOJI = "<a:caarrow:1433143710094196997>"
 VOC_TRIGGER_NAME = "🔊Créer un voc"
 
@@ -53,6 +62,15 @@ VOC_TRIGGER_NAME = "🔊Créer un voc"
 async def on_ready():
     print(f"✅ Connecté comme {bot.user}")
     await bot.change_presence(activity=discord.Game(name="hoshikuzu | +help"))
+
+    # Try to cache invites for invite tracking if permissions allow
+    for guild in bot.guilds:
+        try:
+            invites = await guild.invites()
+            data.setdefault("invites", {})[str(guild.id)] = {inv.code: inv.uses for inv in invites}
+            save_data(data)
+        except Exception:
+            pass
 
 # ==================== LOG HELPER ====================
 async def send_log(guild, embed_or_file):
@@ -66,9 +84,24 @@ async def send_log(guild, embed_or_file):
                 else:
                     await channel.send(file=embed_or_file)
             except Exception as e:
-                print(f"Erreur envoi log: {e}")
+                print(f"[send_log] Erreur envoi log: {e}")
 
-# ==================== CONFIG / WELCOME / LEAVE ====================
+# ==================== HELP ====================
+@bot.command(name="help")
+async def help_cmd(ctx):
+    e = discord.Embed(title="🌿 Commandes Hoshikuzu", color=discord.Color.green())
+    e.add_field(name="📊 Configuration", value="+config\n+setwelcome #channel embed/text\n+setleave #channel embed/text\n+setjoinrole @role\n+setlogs #channel", inline=False)
+    e.add_field(name="👥 Invitations", value="+roleinvite <nombre> @role\n+invites [@user]", inline=False)
+    e.add_field(name="🔗 Liens", value="+allowlink #channel / +disallowlink #channel", inline=False)
+    e.add_field(name="🔒 Modération", value="+lock / +unlock / +ban / +unban / +mute / +unmute / +clear", inline=False)
+    e.add_field(name="👤 Rôles", value="+role @user @role / +rolejoin @role", inline=False)
+    e.add_field(name="🎫 Tickets", value="+ticket / +ticketpanel / +close / +ticketrole", inline=False)
+    e.add_field(name="🎭 Rôles Réactions", value="+reactionrole", inline=False)
+    e.add_field(name="💬 Utilitaires", value="+say <message>", inline=False)
+    e.add_field(name="🔊 Vocaux", value="+createvoc / +setupvoc", inline=False)
+    await ctx.send(embed=e)
+
+# ==================== CONFIG / WELCOME / LEAVE / JOIN ROLE ====================
 @bot.command(name="config")
 @commands.has_permissions(manage_guild=True)
 async def config_cmd(ctx):
@@ -78,76 +111,138 @@ async def config_cmd(ctx):
     e.add_field(name="Bienvenue (texte)", value=conf.get("welcome_text_channel", "❌ Non défini"), inline=False)
     e.add_field(name="Leave (embed)", value=conf.get("leave_embed_channel", "❌ Non défini"), inline=False)
     e.add_field(name="Leave (texte)", value=conf.get("leave_text_channel", "❌ Non défini"), inline=False)
-    e.add_field(name="Tickets rôles", value=conf.get("ticket_roles", "❌ Aucun"), inline=False)
-    e.add_field(name="Trigger Voc", value=conf.get("voc_trigger_channel", "❌ Aucun"), inline=False)
+    e.add_field(name="Join Role", value=conf.get("join_role", "❌ Non défini"), inline=False)
+    e.add_field(name="Logs", value=conf.get("logs_channel", "❌ Non défini"), inline=False)
+    e.add_field(name="Voc Trigger", value=conf.get("voc_trigger_channel", "❌ Non défini"), inline=False)
     await ctx.send(embed=e)
 
 @bot.command(name="setwelcome")
 @commands.has_permissions(manage_guild=True)
-async def setwelcome(ctx, channel: discord.TextChannel, mode):
+async def setwelcome(ctx, channel: discord.TextChannel, mode: str):
     if mode.lower() == "embed":
         set_conf(ctx.guild.id, "welcome_embed_channel", channel.id)
-        await ctx.send(f"✅ Bienvenue embed sur {channel.mention}")
+        await ctx.send(f"✅ Salon embed bienvenue défini sur {channel.mention}")
     else:
         set_conf(ctx.guild.id, "welcome_text_channel", channel.id)
-        await ctx.send(f"✅ Bienvenue texte sur {channel.mention}")
+        await ctx.send(f"✅ Salon texte bienvenue défini sur {channel.mention}")
 
 @bot.command(name="setleave")
 @commands.has_permissions(manage_guild=True)
-async def setleave(ctx, channel: discord.TextChannel, mode):
+async def setleave(ctx, channel: discord.TextChannel, mode: str):
     if mode.lower() == "embed":
         set_conf(ctx.guild.id, "leave_embed_channel", channel.id)
-        await ctx.send(f"✅ Leave embed sur {channel.mention}")
+        await ctx.send(f"✅ Salon embed leave défini sur {channel.mention}")
     else:
         set_conf(ctx.guild.id, "leave_text_channel", channel.id)
-        await ctx.send(f"✅ Leave texte sur {channel.mention}")
+        await ctx.send(f"✅ Salon texte leave défini sur {channel.mention}")
 
-async def send_welcome(member):
+@bot.command(name="setjoinrole")
+@commands.has_permissions(manage_roles=True)
+async def setjoinrole(ctx, role: discord.Role):
+    set_conf(ctx.guild.id, "join_role", role.id)
+    await ctx.send(f"✅ Le rôle {role.mention} sera désormais attribué automatiquement aux nouveaux membres.")
+
+@bot.command(name="setlogs")
+@commands.has_permissions(manage_guild=True)
+async def setlogs(ctx, channel: discord.TextChannel):
+    set_conf(ctx.guild.id, "logs_channel", channel.id)
+    await ctx.send(f"✅ Salon de logs défini sur {channel.mention}")
+
+async def send_welcome(member: discord.Member):
     conf = get_gconf(member.guild.id)
     total = member.guild.member_count
+
+    # Auto assign join role if set
+    join_role_id = conf.get("join_role")
+    if join_role_id:
+        role = member.guild.get_role(join_role_id)
+        if role:
+            try:
+                await member.add_roles(role, reason="Auto join role")
+            except Exception as e:
+                print(f"[send_welcome] couldn't add join role: {e}")
+
     embed_ch = conf.get("welcome_embed_channel")
     text_ch = conf.get("welcome_text_channel")
 
+    # PRO / Minimalist embed
     if embed_ch:
         ch = member.guild.get_channel(embed_ch)
         if ch:
             e = discord.Embed(
-                title="✨ Bienvenue sur Hoshikuzu !",
-                description=f"{member.mention} rejoint le serveur",
-                color=discord.Color.green(),
+                title="👋 Nouveau membre",
+                description=f"{member.mention} vient de rejoindre le serveur.",
+                color=discord.Color.blue(),
                 timestamp=datetime.datetime.utcnow()
             )
-            e.add_field(name="Infos", value=f"{EMOJI} **BVN {member.mention} sur Hoshikuzu !**\n{EMOJI} Nous sommes {total} membres.")
+            e.add_field(
+                name="Informations",
+                value=(
+                    f"{EMOJI} **Bienvenue parmi nous, {member.mention} !**\n"
+                    f"{EMOJI} Le serveur compte maintenant **{total} membres**."
+                ),
+                inline=False
+            )
             e.set_thumbnail(url=member.display_avatar.url)
-            e.set_footer(text="Bienvenue à toi !")
-            await ch.send(embed=e)
+            e.set_footer(text="Bienvenue sur Hoshikuzu.")
+            try:
+                await ch.send(embed=e)
+            except Exception as exc:
+                print(f"[send_welcome] failed to send embed: {exc}")
+
+    # Text message
     if text_ch:
         ch = member.guild.get_channel(text_ch)
         if ch:
-            await ch.send(f"{EMOJI} **BVN {member.mention} sur Hoshikuzu !**\n{EMOJI} Nous sommes {total} membres.")
+            try:
+                await ch.send(
+                    f"{EMOJI} **Bienvenue {member.mention} sur Hoshikuzu !**\n"
+                    f"{EMOJI} Nous sommes désormais **{total} membres**."
+                )
+            except Exception as exc:
+                print(f"[send_welcome] failed to send text: {exc}")
 
-async def send_leave(member):
+async def send_leave(member: discord.Member):
     conf = get_gconf(member.guild.id)
     total = member.guild.member_count
     embed_ch = conf.get("leave_embed_channel")
     text_ch = conf.get("leave_text_channel")
 
+    # Embed
     if embed_ch:
         ch = member.guild.get_channel(embed_ch)
         if ch:
             e = discord.Embed(
-                title="❌ Un membre nous quitte...",
-                description=f"{member.mention} nous a quitté.",
+                title="📤 Départ d’un membre",
+                description=f"{member.mention} a quitté le serveur.",
                 color=discord.Color.red(),
                 timestamp=datetime.datetime.utcnow()
             )
-            e.add_field(name="Infos", value=f"{EMOJI} {member.mention} a quitté Hoshikuzu...\n{EMOJI} Il reste {total} membres.")
+            e.add_field(
+                name="Mise à jour",
+                value=(
+                    f"{EMOJI} Le membre **{member.mention}** est parti.\n"
+                    f"{EMOJI} Le serveur compte maintenant **{total} membres**."
+                ),
+                inline=False
+            )
             e.set_thumbnail(url=member.display_avatar.url)
-            await ch.send(embed=e)
+            try:
+                await ch.send(embed=e)
+            except Exception as exc:
+                print(f"[send_leave] failed to send embed: {exc}")
+
+    # Text
     if text_ch:
         ch = member.guild.get_channel(text_ch)
         if ch:
-            await ch.send(f"{EMOJI} {member.mention} a quitté Hoshikuzu...\n{EMOJI} Il reste {total} membres.")
+            try:
+                await ch.send(
+                    f"{EMOJI} {member.mention} a quitté le serveur.\n"
+                    f"{EMOJI} Il reste désormais **{total} membres**."
+                )
+            except Exception as exc:
+                print(f"[send_leave] failed to send text: {exc}")
 
 @bot.event
 async def on_member_join(member):
@@ -157,19 +252,25 @@ async def on_member_join(member):
 async def on_member_remove(member):
     await send_leave(member)
 
-# ==================== MODÉRATION ====================
+# ==================== MODERATION ====================
 @bot.command(name="ban")
 @commands.has_permissions(ban_members=True)
-async def ban_user(ctx, member: discord.Member, *, reason="Aucune raison"):
+async def ban_command(ctx, member: discord.Member, *, reason: str = "Aucune raison fournie"):
+    # Safety checks
     if member.id == ctx.author.id:
         return await ctx.send("❌ Tu ne peux pas te bannir toi-même.")
     if member.id == ctx.guild.me.id:
         return await ctx.send("❌ Je ne peux pas me bannir moi-même.")
-    if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
-        return await ctx.send("❌ Tu ne peux pas bannir un membre avec un rôle plus haut ou égal.")
     if member.guild_permissions.administrator:
-        return await ctx.send("❌ Tu ne peux pas bannir un administrateur.")
-    await member.ban(reason=f"Banni par {ctx.author} | {reason}")
+        return await ctx.send("❌ Impossible de bannir un administrateur.")
+    if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+        return await ctx.send("❌ Tu ne peux pas bannir un membre avec un rôle supérieur ou égal au tien.")
+
+    try:
+        await member.ban(reason=f"Banni par {ctx.author} | {reason}")
+    except Exception as e:
+        return await ctx.send(f"❌ Échec du ban : {e}")
+
     embed = discord.Embed(title="🔨 Membre banni", color=discord.Color.red(), timestamp=datetime.datetime.utcnow())
     embed.add_field(name="👤 Membre", value=f"{member} (`{member.id}`)", inline=False)
     embed.add_field(name="🛠️ Par", value=ctx.author.mention, inline=False)
@@ -179,36 +280,41 @@ async def ban_user(ctx, member: discord.Member, *, reason="Aucune raison"):
 
 @bot.command(name="unban")
 @commands.has_permissions(ban_members=True)
-async def unban_user(ctx, *, user: str):
+async def unban_command(ctx, *, user: str):
     banned = await ctx.guild.bans()
     try:
         name, discrim = user.split("#")
-    except:
-        return await ctx.send("❌ Format invalide, utiliser Username#0000")
+    except Exception:
+        return await ctx.send("❌ Format invalide. Utilise `Pseudo#0000`.")
     for ban_entry in banned:
         u = ban_entry.user
         if (u.name, u.discriminator) == (name, discrim):
-            await ctx.guild.unban(u)
-            await ctx.send(f"🔓 {u.mention} a été dé-banni.")
+            try:
+                await ctx.guild.unban(u)
+            except Exception as e:
+                return await ctx.send(f"❌ Échec du unban : {e}")
             embed = discord.Embed(title="♻️ Unban", color=discord.Color.green(), timestamp=datetime.datetime.utcnow())
             embed.add_field(name="Utilisateur", value=u.mention)
             embed.add_field(name="Par", value=ctx.author.mention)
+            await ctx.send(f"🔓 {u.mention} a été débanni.")
             await send_log(ctx.guild, embed)
             return
     await ctx.send("❌ Membre non trouvé dans la liste des bannis.")
 
 @bot.command(name="mute")
 @commands.has_permissions(moderate_members=True)
-async def mute(ctx, member: discord.Member, duration: int, unit: str = "m", *, reason="Aucune raison"):
+async def mute_command(ctx, member: discord.Member, duration: int, unit: str = "m", *, reason: str = "Aucune raison fournie"):
     mult = {"s":1, "m":60, "h":3600, "d":86400}
     unit = unit.lower()
     if unit not in mult:
-        return await ctx.send("❌ Unité invalide (s, m, h, d)")
+        return await ctx.send("❌ Unité invalide (s/m/h/d). Exemple : `+mute @user 10 m`")
     seconds = duration * mult[unit]
+    until = discord.utils.utcnow() + datetime.timedelta(seconds=seconds)
     try:
-        await member.timeout(datetime.timedelta(seconds=seconds), reason=f"Mute par {ctx.author} | {reason}")
+        await member.timeout(until, reason=f"Mute par {ctx.author} | {reason}")
     except Exception as e:
         return await ctx.send(f"❌ Impossible de mute : {e}")
+
     embed = discord.Embed(title="🔇 Mute", color=discord.Color.orange(), timestamp=datetime.datetime.utcnow())
     embed.add_field(name="Utilisateur", value=member.mention)
     embed.add_field(name="Durée", value=f"{duration}{unit}")
@@ -219,17 +325,26 @@ async def mute(ctx, member: discord.Member, duration: int, unit: str = "m", *, r
 
 @bot.command(name="unmute")
 @commands.has_permissions(moderate_members=True)
-async def unmute(ctx, member: discord.Member, *, reason="Aucune raison"):
+async def unmute_command(ctx, member: discord.Member, *, reason: str = "Aucune raison fournie"):
     try:
         await member.timeout(None, reason=f"Unmute par {ctx.author} | {reason}")
     except Exception as e:
         return await ctx.send(f"❌ Impossible d’unmute : {e}")
+
     embed = discord.Embed(title="🔊 Unmute", color=discord.Color.green(), timestamp=datetime.datetime.utcnow())
     embed.add_field(name="Utilisateur", value=member.mention)
     embed.add_field(name="Raison", value=reason)
     embed.add_field(name="Par", value=ctx.author.mention)
     await ctx.send(f"🔊 {member.mention} a été unmute.")
     await send_log(ctx.guild, embed)
+
+@bot.command(name="clear")
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, amount: int = 10):
+    if amount < 1 or amount > 100:
+        return await ctx.send("❌ Le nombre doit être entre 1 et 100.")
+    deleted = await ctx.channel.purge(limit=amount+1)  # include command message
+    await ctx.send(f"🧹 {len(deleted)-1} messages supprimés.", delete_after=5)
 
 # ==================== TICKETS ====================
 class CloseButton(Button):
@@ -238,7 +353,10 @@ class CloseButton(Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_message("🔒 Ce ticket sera supprimé dans 5 secondes...", ephemeral=True)
         await asyncio.sleep(5)
-        await interaction.channel.delete()
+        try:
+            await interaction.channel.delete()
+        except Exception:
+            pass
 
 class TicketView(View):
     def __init__(self):
@@ -262,39 +380,82 @@ async def ticket(ctx):
     await channel.send(embed=embed, view=TicketView())
     await ctx.send(f"✅ Ticket créé : {channel.mention}", delete_after=5)
 
-# ==================== VOC TEMP ====================
+@bot.command(name="ticketpanel")
+@commands.has_permissions(manage_guild=True)
+async def ticket_panel(ctx):
+    embed = discord.Embed(title="🎫 Ouvre un ticket !", description="Clique sur le bouton ci-dessous pour créer un ticket privé !", color=discord.Color.green())
+    view = TicketView()
+    msg = await ctx.send(embed=embed, view=view)
+    set_conf(ctx.guild.id, "ticket_panel", msg.id)
+    set_conf(ctx.guild.id, "ticket_panel_channel", ctx.channel.id)
+    await ctx.send("✅ Panel de tickets créé avec succès !")
+
+@bot.command(name="ticketrole")
+@commands.has_permissions(manage_guild=True)
+async def ticket_role(ctx, *roles: discord.Role):
+    role_ids = [role.id for role in roles]
+    set_conf(ctx.guild.id, "ticket_roles", role_ids)
+    await ctx.send(f"✅ Les rôles {', '.join([r.name for r in roles])} seront ajoutés aux tickets.")
+
+@bot.command(name="close")
+async def close_ticket(ctx):
+    if ctx.channel.name.startswith("ticket-"):
+        await ctx.send("🔒 Ce ticket sera supprimé dans 5 secondes...")
+        e = discord.Embed(title="🎫 Ticket fermé", color=discord.Color.red())
+        e.add_field(name="Fermé par", value=ctx.author.mention, inline=True)
+        e.add_field(name="Salon", value=ctx.channel.name, inline=True)
+        e.timestamp = datetime.datetime.utcnow()
+        await send_log(ctx.guild, e)
+        await asyncio.sleep(5)
+        try:
+            await ctx.channel.delete()
+        except Exception:
+            pass
+    else:
+        await ctx.send("❌ Cette commande ne fonctionne que dans un ticket.")
+
+# ==================== VOC TEMPORAIRES ====================
 @bot.command(name="setupvoc")
 @commands.has_permissions(manage_guild=True)
 async def setup_voc(ctx, channel: discord.VoiceChannel):
     set_conf(ctx.guild.id, "voc_trigger_channel", channel.id)
-    await channel.edit(name=VOC_TRIGGER_NAME)
-    await ctx.send(f"✅ Salon trigger vocal configuré : {channel.mention}")
+    try:
+        await channel.edit(name=VOC_TRIGGER_NAME)
+    except Exception:
+        pass
+    await ctx.send(f"✅ Salon vocal trigger configuré : {channel.mention}")
 
 @bot.command(name="createvoc")
 @commands.has_permissions(manage_guild=True)
 async def create_voc(ctx):
     category = ctx.channel.category
-    voc = await ctx.guild.create_voice_channel(name=VOC_TRIGGER_NAME, category=category)
-    set_conf(ctx.guild.id, "voc_trigger_channel", voc.id)
-    await ctx.send(f"✅ Salon vocal trigger créé : {voc.mention}")
+    voc_trigger = await ctx.guild.create_voice_channel(name=VOC_TRIGGER_NAME, category=category)
+    set_conf(ctx.guild.id, "voc_trigger_channel", voc_trigger.id)
+    await ctx.send(f"✅ Salon vocal trigger créé : {voc_trigger.mention}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    gid = member.guild.id
-    trigger = get_conf(gid, "voc_trigger_channel")
-    if after.channel and after.channel.id == trigger:
-        voc = await member.guild.create_voice_channel(name=f"🔊 {member.display_name}", category=after.channel.category)
-        data.setdefault("temp_vocs", {})[str(voc.id)] = {"owner": member.id, "created_at": datetime.datetime.utcnow().isoformat()}
-        save_data(data)
-        await member.move_to(voc)
+    guild = member.guild
+    trigger_channel_id = get_conf(guild.id, "voc_trigger_channel")
+    if after.channel and trigger_channel_id and after.channel.id == trigger_channel_id:
+        try:
+            voc = await guild.create_voice_channel(name=f"🔊 {member.display_name}", category=after.channel.category)
+            data.setdefault("temp_vocs", {})[str(voc.id)] = {"owner": member.id, "created_at": datetime.datetime.utcnow().isoformat()}
+            save_data(data)
+            await member.move_to(voc)
+        except Exception as e:
+            print(f"[on_voice_state_update] create voc error: {e}")
     if before.channel:
         cid = str(before.channel.id)
         if cid in data.get("temp_vocs", {}) and len(before.channel.members) == 0:
-            await before.channel.delete()
+            try:
+                await before.channel.delete()
+            except Exception:
+                pass
             del data["temp_vocs"][cid]
             save_data(data)
 
-# ==================== LIENS ====================
+# ==================== LIENS / ANTI-LINK ====================
 @bot.command(name="allowlink")
 @commands.has_permissions(manage_guild=True)
 async def allow_link(ctx, channel: discord.TextChannel):
@@ -305,7 +466,7 @@ async def allow_link(ctx, channel: discord.TextChannel):
         save_data(data)
         await ctx.send(f"✅ Liens autorisés dans {channel.mention}")
     else:
-        await ctx.send("ℹ️ Liens déjà autorisés")
+        await ctx.send("ℹ️ Les liens étaient déjà autorisés ici.")
 
 @bot.command(name="disallowlink")
 @commands.has_permissions(manage_guild=True)
@@ -316,18 +477,28 @@ async def disallow_link(ctx, channel: discord.TextChannel):
         save_data(data)
         await ctx.send(f"❌ Liens bloqués dans {channel.mention}")
     else:
-        await ctx.send("ℹ️ Liens déjà bloqués")
+        await ctx.send("ℹ️ Les liens étaient déjà bloqués ici.")
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         await bot.process_commands(message)
         return
+    if not message.guild:
+        await bot.process_commands(message)
+        return
     gid = str(message.guild.id)
     allowed = data.get("allowed_links", {}).get(gid, [])
     url_regex = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     if message.channel.id not in allowed and re.search(url_regex, message.content):
-        await message.delete()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            await message.channel.send(f"❌ {message.author.mention}, les liens ne sont pas autorisés ici !", delete_after=5)
+        except Exception:
+            pass
         e = discord.Embed(title="🔗 Lien supprimé", color=discord.Color.orange())
         e.add_field(name="Auteur", value=message.author.mention, inline=True)
         e.add_field(name="Salon", value=message.channel.mention, inline=True)
@@ -337,30 +508,40 @@ async def on_message(message):
         return
     await bot.process_commands(message)
 
-# ==================== SAY / LOCK / REACTION ROLES ====================
+# ==================== SAY / LOCK / UNLOCK ====================
 @bot.command(name="say")
 @commands.has_permissions(manage_guild=True)
-async def say(ctx, *, msg):
-    await ctx.message.delete()
+async def say(ctx, *, msg: str):
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
     await ctx.send(msg)
 
 @bot.command(name="lock")
 @commands.has_permissions(manage_channels=True)
 async def lock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    try:
+        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    except Exception:
+        pass
     await ctx.send("🔒 Salon verrouillé")
 
 @bot.command(name="unlock")
 @commands.has_permissions(manage_channels=True)
 async def unlock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    try:
+        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    except Exception:
+        pass
     await ctx.send("🔓 Salon déverrouillé")
 
+# ==================== REACTION ROLES ====================
 class ReactionButton(Button):
     def __init__(self, emoji, role_id):
         super().__init__(emoji=emoji, style=discord.ButtonStyle.gray)
         self.role_id = role_id
-    async def callback(self, interaction):
+    async def callback(self, interaction: discord.Interaction):
         role = interaction.guild.get_role(self.role_id)
         if role in interaction.user.roles:
             await interaction.user.remove_roles(role)
@@ -371,7 +552,7 @@ class ReactionButton(Button):
 
 @bot.command(name="reactionrole")
 @commands.has_permissions(manage_guild=True)
-async def reactionrole(ctx, channel: discord.TextChannel, emoji, role: discord.Role):
+async def reactionrole(ctx, channel: discord.TextChannel, emoji: str, role: discord.Role):
     view = View(timeout=None)
     view.add_item(ReactionButton(emoji, role.id))
     msg = await channel.send(f"Réagis avec {emoji} pour obtenir le rôle **{role.name}**", view=view)
