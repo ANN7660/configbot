@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hoshikuzu Discord Bot - Version Sans Modération
+Hoshikuzu Discord Bot - Version Sans Modération (Corrigée)
 Bot de gestion de serveur Discord complet et sécurisé
 """
 
@@ -88,8 +88,8 @@ def load_data() -> Dict[str, Any]:
     logger.info("Using default data structure")
     return default_data
 
-def save_data(d: Dict[str, Any]):
-    """Sauvegarde les données avec backup automatique (synchrone pour les threads)"""
+def save_data_sync(d: Dict[str, Any]):
+    """Sauvegarde les données de manière synchrone (pour threading)"""
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -114,7 +114,7 @@ async def set_conf(gid: int, key: str, value):
     """Définit une configuration de manière async-safe"""
     async with data_lock:
         data.setdefault("config", {}).setdefault(str(gid), {})[key] = value
-        await asyncio.to_thread(save_data, data)
+        await asyncio.to_thread(save_data_sync, data)
 
 async def get_gconf(gid: int) -> Dict[str, Any]:
     """Récupère toute la configuration d'une guilde"""
@@ -472,13 +472,13 @@ async def on_member_join(member: discord.Member):
                             data.setdefault("invites", {}).setdefault(str(member.guild.id), {}).setdefault(inviter_id, {"count": 0, "members": []})
                             data["invites"][str(member.guild.id)][inviter_id]["count"] += 1
                             data["invites"][str(member.guild.id)][inviter_id]["members"].append(member.id)
-                            await asyncio.to_thread(save_data, data)
+                            await asyncio.to_thread(save_data_sync, data)
                         logger.info(f"{member} invited by {inv.inviter}")
                         break
         
         async with data_lock:
             data.setdefault("invites", {})[str(member.guild.id)] = invites_after
-            await asyncio.to_thread(save_data, data)
+            await asyncio.to_thread(save_data_sync, data)
     except discord.Forbidden:
         logger.warning(f"Cannot track invites in {member.guild.name}: Missing permissions")
     except Exception as e:
@@ -527,7 +527,7 @@ async def roleinvite(ctx, count: Optional[int] = None, role: Optional[discord.Ro
     gid = str(ctx.guild.id)
     async with data_lock:
         data.setdefault("config", {}).setdefault(gid, {}).setdefault("role_invites", {})[str(role.id)] = count
-        await asyncio.to_thread(save_data, data)
+        await asyncio.to_thread(save_data_sync, data)
     
     await ctx.send(f"✅ Le rôle {role.mention} sera donné après **{count}** invitation(s).")
     logger.info(f"Role invite set: {count} invites for {role.name} in {ctx.guild.name}")
@@ -576,68 +576,6 @@ async def rolejoin(ctx, role: Optional[discord.Role] = None):
     await set_conf(ctx.guild.id, "role_join", role.id)
     await ctx.send(f"✅ Rôle {role.mention} sera attribué à chaque nouvel arrivant.")
     logger.info(f"Auto-role set to {role.name} in {ctx.guild.name}")
-
-# ==================== TICKETS ====================
-class CloseButton(Button):
-    def __init__(self):
-        super().__init__(label="Fermer le ticket", style=discord.ButtonStyle.red, emoji="🔒")
-    
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message("🔒 Ce ticket sera supprimé dans 5 secondes...", ephemeral=True)
-        await asyncio.sleep(5)
-        try:
-            await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
-            logger.info(f"Ticket {interaction.channel.name} closed by {interaction.user}")
-        except Exception as e:
-            logger.error(f"Error closing ticket: {e}")
-
-class TicketView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(CloseButton())
-
-@bot.command(name="ticket")
-async def ticket(ctx):
-    """Crée un ticket privé"""
-    for channel in ctx.guild.text_channels:
-        if f"ticket-{ctx.author.name}".lower() in channel.name.lower():
-            return await ctx.send(f"❌ Tu as déjà un ticket ouvert : {channel.mention}", delete_after=5)
-    
-    overwrites = {
-        ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    }
-    
-    try:
-        channel = await ctx.guild.create_text_channel(
-            name=f"ticket-{ctx.author.name}",
-            overwrites=overwrites,
-            reason=f"Ticket créé par {ctx.author}"
-        )
-        
-        ticket_roles = await get_conf(ctx.guild.id, "ticket_roles") or []
-        for role_id in ticket_roles:
-            role = ctx.guild.get_role(role_id)
-            if role:
-                await channel.set_permissions(role, read_messages=True, send_messages=True)
-        
-        embed = discord.Embed(
-            title="🎫 Ticket ouvert",
-            description=f"{ctx.author.mention}, explique ton problème ici.\nUn membre du staff va te répondre.",
-            color=discord.Color.green(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        embed.set_footer(text=f"Ticket de {ctx.author}", icon_url=ctx.author.display_avatar.url)
-        
-        await channel.send(embed=embed, view=TicketView())
-        await ctx.send(f"✅ Ticket créé : {channel.mention}", delete_after=5)
-        logger.info(f"Ticket created by {ctx.author} in {ctx.guild.name}")
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions pour créer un ticket.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors de la création du ticket : {e}")
-        logger.error(f"Ticket creation error: {e}")
 
 # ==================== TICKETROLE ====================
 @bot.command(name="ticketrole")
@@ -804,7 +742,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                     "owner": member.id,
                     "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
                 }
-                await asyncio.to_thread(save_data, data)
+                await asyncio.to_thread(save_data_sync, data)
             
             await member.move_to(voc)
             logger.info(f"Temporary voice channel created for {member} in {guild.name}")
@@ -820,7 +758,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 try:
                     await before.channel.delete(reason="Vocal temporaire vide")
                     del data["temp_vocs"][cid]
-                    await asyncio.to_thread(save_data, data)
+                    await asyncio.to_thread(save_data_sync, data)
                     logger.info(f"Temporary voice channel deleted in {guild.name}")
                 except discord.Forbidden:
                     logger.warning(f"Cannot delete temp voice in {guild.name}: Missing permissions")
@@ -842,7 +780,7 @@ async def allow_link(ctx, channel: Optional[discord.TextChannel] = None):
         
         if channel.id not in data["allowed_links"][gid]:
             data["allowed_links"][gid].append(channel.id)
-            await asyncio.to_thread(save_data, data)
+            await asyncio.to_thread(save_data_sync, data)
             await ctx.send(f"✅ Liens autorisés dans {channel.mention}")
             logger.info(f"Links allowed in {channel.name} ({ctx.guild.name})")
         else:
@@ -860,7 +798,7 @@ async def disallow_link(ctx, channel: Optional[discord.TextChannel] = None):
     async with data_lock:
         if gid in data.get("allowed_links", {}) and channel.id in data["allowed_links"][gid]:
             data["allowed_links"][gid].remove(channel.id)
-            await asyncio.to_thread(save_data, data)
+            await asyncio.to_thread(save_data_sync, data)
             await ctx.send(f"❌ Liens bloqués dans {channel.mention}")
             logger.info(f"Links blocked in {channel.name} ({ctx.guild.name})")
         else:
@@ -972,7 +910,7 @@ async def reactionrole(ctx, channel: Optional[discord.TextChannel] = None, emoji
                 "emoji": emoji,
                 "role_id": role.id
             }
-            await asyncio.to_thread(save_data, data)
+            await asyncio.to_thread(save_data_sync, data)
         
         await ctx.send(f"✅ Rôle réaction configuré dans {channel.mention}")
         logger.info(f"Reaction role created in {channel.name} for {role.name}")
@@ -1022,4 +960,66 @@ if __name__ == "__main__":
         print("❌ Token Discord invalide. Vérifie ta variable d'environnement DISCORD_TOKEN.")
     except Exception as e:
         logger.critical(f"Fatal error: {e}", exc_info=e)
-        print(f"❌ Erreur fatale : {e}")
+        print(f"❌ Erreur fatale : {e}")TS ====================
+class CloseButton(Button):
+    def __init__(self):
+        super().__init__(label="Fermer le ticket", style=discord.ButtonStyle.red, emoji="🔒")
+    
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("🔒 Ce ticket sera supprimé dans 5 secondes...", ephemeral=True)
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
+            logger.info(f"Ticket {interaction.channel.name} closed by {interaction.user}")
+        except Exception as e:
+            logger.error(f"Error closing ticket: {e}")
+
+class TicketView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CloseButton())
+
+@bot.command(name="ticket")
+async def ticket(ctx):
+    """Crée un ticket privé"""
+    for channel in ctx.guild.text_channels:
+        if f"ticket-{ctx.author.name}".lower() in channel.name.lower():
+            return await ctx.send(f"❌ Tu as déjà un ticket ouvert : {channel.mention}", delete_after=5)
+    
+    overwrites = {
+        ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+    
+    try:
+        channel = await ctx.guild.create_text_channel(
+            name=f"ticket-{ctx.author.name}",
+            overwrites=overwrites,
+            reason=f"Ticket créé par {ctx.author}"
+        )
+        
+        ticket_roles = await get_conf(ctx.guild.id, "ticket_roles") or []
+        for role_id in ticket_roles:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                await channel.set_permissions(role, read_messages=True, send_messages=True)
+        
+        embed = discord.Embed(
+            title="🎫 Ticket ouvert",
+            description=f"{ctx.author.mention}, explique ton problème ici.\nUn membre du staff va te répondre.",
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_footer(text=f"Ticket de {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        
+        await channel.send(embed=embed, view=TicketView())
+        await ctx.send(f"✅ Ticket créé : {channel.mention}", delete_after=5)
+        logger.info(f"Ticket created by {ctx.author} in {ctx.guild.name}")
+    except discord.Forbidden:
+        await ctx.send("❌ Je n'ai pas les permissions pour créer un ticket.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur lors de la création du ticket : {e}")
+        logger.error(f"Ticket creation error: {e}")
+
+# ==================== TICKE
