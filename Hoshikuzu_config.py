@@ -153,7 +153,12 @@ async def send_log(guild: discord.Guild, content):
 # ==================== TICKETS VIEWS ====================
 class CloseButton(Button):
     def __init__(self):
-        super().__init__(label="Fermer le ticket", style=discord.ButtonStyle.red, emoji="🔒")
+        super().__init__(
+            label="Fermer le ticket",
+            style=discord.ButtonStyle.red,
+            emoji="🔒",
+            custom_id="ticket_close_button"
+        )
     
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_message("🔒 Ce ticket sera supprimé dans 5 secondes...", ephemeral=True)
@@ -171,7 +176,12 @@ class TicketView(View):
 
 class CreateTicketButton(Button):
     def __init__(self):
-        super().__init__(label="Créer un ticket", style=discord.ButtonStyle.green, emoji="🎫")
+        super().__init__(
+            label="Créer un ticket",
+            style=discord.ButtonStyle.green,
+            emoji="🎫",
+            custom_id="ticket_create_button"
+        )
     
     async def callback(self, interaction: discord.Interaction):
         for channel in interaction.guild.text_channels:
@@ -224,7 +234,11 @@ class TicketPanelView(View):
 
 class ReactionButton(Button):
     def __init__(self, emoji: str, role_id: int):
-        super().__init__(emoji=emoji, style=discord.ButtonStyle.gray)
+        super().__init__(
+            emoji=emoji,
+            style=discord.ButtonStyle.gray,
+            custom_id=f"reaction_role_{role_id}"
+        )
         self.role_id = role_id
     
     async def callback(self, interaction: discord.Interaction):
