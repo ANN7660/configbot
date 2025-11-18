@@ -167,8 +167,40 @@ async def on_member_remove(member):
 @bot.command(name="ban")
 @commands.has_permissions(ban_members=True)
 async def ban(ctx, member: discord.Member, *, reason="Aucune raison"):
+    # Empêche de se ban soi-même
+    if member.id == ctx.author.id:
+        return await ctx.send("❌ Tu ne peux pas te bannir toi-même.")
+
+    # Empêche de ban le bot
+    if member.id == ctx.guild.me.id:
+        return await ctx.send("❌ Je ne peux pas me bannir moi-même.")
+
+    # Empêche de ban quelqu’un de plus haut dans la hiérarchie
+    if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+        return await ctx.send("❌ Tu ne peux pas bannir quelqu’un qui a un rôle supérieur ou égal au tien.")
+
+    # Empêche de ban un admin ou mod
+    if member.guild_permissions.administrator:
+        return await ctx.send("❌ Impossible de bannir un administrateur.")
+
+    # Bannissement
     await member.ban(reason=f"Banni par {ctx.author} | {reason}")
-    await ctx.send(f"🔨 {member} a été **banni**.")
+
+    # Embed de confirmation
+    embed = discord.Embed(
+        title="🔨 Membre banni",
+        color=discord.Color.red(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.add_field(name="👤 Membre", value=f"{member} (`{member.id}`)", inline=False)
+    embed.add_field(name="🛠️ Staff", value=ctx.author.mention, inline=False)
+    embed.add_field(name="📄 Raison", value=reason, inline=False)
+
+    await ctx.send(embed=embed)
+
+    # Logs si configurés
+    await send_log(ctx.guild, embed)
+
 
 @bot.command(name="unban")
 @commands.has_permissions(ban_members=True)
