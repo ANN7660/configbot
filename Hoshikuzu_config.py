@@ -15,7 +15,7 @@ from datetime import timedelta
 
 import discord
 from discord.ext import commands
-from discord.ui import View, Button, Select
+from discord.ui import View, Button, Select, ChannelSelect as DiscordChannelSelect, RoleSelect as DiscordRoleSelect
 
 # ==================== CONFIGURATION LOGGING ====================
 logging.basicConfig(
@@ -453,11 +453,16 @@ class ReactionButton(Button):
         except:
             await interaction.response.send_message("❌ Erreur lors de la gestion du rôle.", ephemeral=True)
 
-# ==================== CONFIG VIEWS ====================
-class ChannelSelect(Select):
+# ==================== CONFIG VIEWS (VERSION CORRIGÉE) ====================
+class ChannelSelect(DiscordChannelSelect):
     def __init__(self, config_type: str, placeholder: str):
-        super().__init__(placeholder=placeholder, min_values=1, max_values=1, custom_id=f"config_select_{config_type}", 
-                        select_type=discord.ComponentType.channel_select, channel_types=[discord.ChannelType.text])
+        super().__init__(
+            placeholder=placeholder, 
+            min_values=1, 
+            max_values=1, 
+            custom_id=f"config_select_{config_type}",
+            channel_types=[discord.ChannelType.text]
+        )
         self.config_type = config_type
     
     async def callback(self, interaction: discord.Interaction):
@@ -465,17 +470,26 @@ class ChannelSelect(Select):
             return await interaction.response.send_message("❌ Permissions insuffisantes.", ephemeral=True)
         
         channel = self.values[0]
-        config_keys = {"welcome_embed": "welcome_embed_channel", "welcome_text": "welcome_text_channel",
-                      "leave_embed": "leave_embed_channel", "leave_text": "leave_text_channel", "logs": "logs_channel"}
+        config_keys = {
+            "welcome_embed": "welcome_embed_channel", 
+            "welcome_text": "welcome_text_channel",
+            "leave_embed": "leave_embed_channel", 
+            "leave_text": "leave_text_channel", 
+            "logs": "logs_channel"
+        }
         
         await set_conf(interaction.guild.id, config_keys[self.config_type], channel.id)
         await interaction.response.send_message(f"✅ Configuration mise à jour pour {channel.mention}", ephemeral=True)
         await update_config_embed(interaction)
 
-class RoleSelect(Select):
+class RoleSelect(DiscordRoleSelect):
     def __init__(self):
-        super().__init__(placeholder="🎭 Rôle automatique", min_values=1, max_values=1, 
-                        custom_id="config_select_join_role", select_type=discord.ComponentType.role_select)
+        super().__init__(
+            placeholder="🎭 Rôle automatique", 
+            min_values=1, 
+            max_values=1, 
+            custom_id="config_select_join_role"
+        )
     
     async def callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
