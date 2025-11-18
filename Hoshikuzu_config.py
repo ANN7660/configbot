@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hoshikuzu Discord Bot - Version Sans Modération (Corrigée)
+Hoshikuzu Discord Bot - Version Sans Modération
 Bot de gestion de serveur Discord complet et sécurisé
 """
 
@@ -89,7 +89,7 @@ def load_data() -> Dict[str, Any]:
     return default_data
 
 def save_data_sync(d: Dict[str, Any]):
-    """Sauvegarde les données de manière synchrone (pour threading)"""
+    """Sauvegarde les données de manière synchrone"""
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -149,6 +149,100 @@ async def send_log(guild: discord.Guild, content):
         logger.warning(f"Cannot send log to channel {logs_channel_id}: Missing permissions")
     except Exception as e:
         logger.error(f"Error sending log: {e}")
+
+# ==================== TICKETS VIEWS ====================
+class CloseButton(Button):
+    def __init__(self):
+        super().__init__(label="Fermer le ticket", style=discord.ButtonStyle.red, emoji="🔒")
+    
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("🔒 Ce ticket sera supprimé dans 5 secondes...", ephemeral=True)
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
+            logger.info(f"Ticket {interaction.channel.name} closed by {interaction.user}")
+        except Exception as e:
+            logger.error(f"Error closing ticket: {e}")
+
+class TicketView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CloseButton())
+
+class CreateTicketButton(Button):
+    def __init__(self):
+        super().__init__(label="Créer un ticket", style=discord.ButtonStyle.green, emoji="🎫")
+    
+    async def callback(self, interaction: discord.Interaction):
+        for channel in interaction.guild.text_channels:
+            if f"ticket-{interaction.user.name}".lower() in channel.name.lower():
+                return await interaction.response.send_message(
+                    f"❌ Tu as déjà un ticket ouvert : {channel.mention}",
+                    ephemeral=True
+                )
+        
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        
+        try:
+            channel = await interaction.guild.create_text_channel(
+                name=f"ticket-{interaction.user.name}",
+                overwrites=overwrites,
+                reason=f"Ticket créé par {interaction.user}"
+            )
+            
+            ticket_roles = await get_conf(interaction.guild.id, "ticket_roles") or []
+            for role_id in ticket_roles:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    await channel.set_permissions(role, read_messages=True, send_messages=True)
+            
+            embed = discord.Embed(
+                title="🎫 Ticket ouvert",
+                description=f"{interaction.user.mention}, explique ton problème ici.\nUn membre du staff va te répondre.",
+                color=discord.Color.green(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )
+            embed.set_footer(text=f"Ticket de {interaction.user}", icon_url=interaction.user.display_avatar.url)
+            
+            await channel.send(embed=embed, view=TicketView())
+            await interaction.response.send_message(f"✅ Ticket créé : {channel.mention}", ephemeral=True)
+            logger.info(f"Ticket created by {interaction.user} in {interaction.guild.name}")
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Erreur : permissions insuffisantes.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erreur : {e}", ephemeral=True)
+            logger.error(f"Ticket creation error: {e}")
+
+class TicketPanelView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CreateTicketButton())
+
+class ReactionButton(Button):
+    def __init__(self, emoji: str, role_id: int):
+        super().__init__(emoji=emoji, style=discord.ButtonStyle.gray)
+        self.role_id = role_id
+    
+    async def callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            return await interaction.response.send_message("❌ Rôle introuvable.", ephemeral=True)
+        
+        try:
+            if role in interaction.user.roles:
+                await interaction.user.remove_roles(role, reason="Rôle réaction")
+                await interaction.response.send_message(f"❌ Rôle **{role.name}** retiré", ephemeral=True)
+            else:
+                await interaction.user.add_roles(role, reason="Rôle réaction")
+                await interaction.response.send_message(f"✅ Rôle **{role.name}** ajouté", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Je n'ai pas les permissions pour gérer ce rôle.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erreur : {e}", ephemeral=True)
 
 # ==================== READY ====================
 @bot.event
@@ -577,6 +671,50 @@ async def rolejoin(ctx, role: Optional[discord.Role] = None):
     await ctx.send(f"✅ Rôle {role.mention} sera attribué à chaque nouvel arrivant.")
     logger.info(f"Auto-role set to {role.name} in {ctx.guild.name}")
 
+# ==================== TICKETS ====================
+@bot.command(name="ticket")
+async def ticket(ctx):
+    """Crée un ticket privé"""
+    for channel in ctx.guild.text_channels:
+        if f"ticket-{ctx.author.name}".lower() in channel.name.lower():
+            return await ctx.send(f"❌ Tu as déjà un ticket ouvert : {channel.mention}", delete_after=5)
+    
+    overwrites = {
+        ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+    
+    try:
+        channel = await ctx.guild.create_text_channel(
+            name=f"ticket-{ctx.author.name}",
+            overwrites=overwrites,
+            reason=f"Ticket créé par {ctx.author}"
+        )
+        
+        ticket_roles = await get_conf(ctx.guild.id, "ticket_roles") or []
+        for role_id in ticket_roles:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                await channel.set_permissions(role, read_messages=True, send_messages=True)
+        
+        embed = discord.Embed(
+            title="🎫 Ticket ouvert",
+            description=f"{ctx.author.mention}, explique ton problème ici.\nUn membre du staff va te répondre.",
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_footer(text=f"Ticket de {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        
+        await channel.send(embed=embed, view=TicketView())
+        await ctx.send(f"✅ Ticket créé : {channel.mention}", delete_after=5)
+        logger.info(f"Ticket created by {ctx.author} in {ctx.guild.name}")
+    except discord.Forbidden:
+        await ctx.send("❌ Je n'ai pas les permissions pour créer un ticket.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur lors de la création du ticket : {e}")
+        logger.error(f"Ticket creation error: {e}")
+
 # ==================== TICKETROLE ====================
 @bot.command(name="ticketrole")
 @commands.has_permissions(manage_guild=True)
@@ -615,59 +753,6 @@ async def close(ctx):
         logger.error(f"Error closing ticket: {e}")
 
 # ==================== TICKETPANEL ====================
-class CreateTicketButton(Button):
-    def __init__(self):
-        super().__init__(label="Créer un ticket", style=discord.ButtonStyle.green, emoji="🎫")
-    
-    async def callback(self, interaction: discord.Interaction):
-        for channel in interaction.guild.text_channels:
-            if f"ticket-{interaction.user.name}".lower() in channel.name.lower():
-                return await interaction.response.send_message(
-                    f"❌ Tu as déjà un ticket ouvert : {channel.mention}",
-                    ephemeral=True
-                )
-        
-        overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        
-        try:
-            channel = await interaction.guild.create_text_channel(
-                name=f"ticket-{interaction.user.name}",
-                overwrites=overwrites,
-                reason=f"Ticket créé par {interaction.user}"
-            )
-            
-            ticket_roles = await get_conf(interaction.guild.id, "ticket_roles") or []
-            for role_id in ticket_roles:
-                role = interaction.guild.get_role(role_id)
-                if role:
-                    await channel.set_permissions(role, read_messages=True, send_messages=True)
-            
-            embed = discord.Embed(
-                title="🎫 Ticket ouvert",
-                description=f"{interaction.user.mention}, explique ton problème ici.\nUn membre du staff va te répondre.",
-                color=discord.Color.green(),
-                timestamp=datetime.datetime.now(datetime.timezone.utc)
-            )
-            embed.set_footer(text=f"Ticket de {interaction.user}", icon_url=interaction.user.display_avatar.url)
-            
-            await channel.send(embed=embed, view=TicketView())
-            await interaction.response.send_message(f"✅ Ticket créé : {channel.mention}", ephemeral=True)
-            logger.info(f"Ticket created by {interaction.user} in {interaction.guild.name}")
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ Erreur : permissions insuffisantes.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Erreur : {e}", ephemeral=True)
-            logger.error(f"Ticket creation error: {e}")
-
-class TicketPanelView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(CreateTicketButton())
-
 @bot.command(name="ticketpanel")
 @commands.has_permissions(manage_guild=True)
 async def ticketpanel(ctx):
@@ -860,28 +945,6 @@ async def say(ctx, *, msg: Optional[str] = None):
     logger.info(f"Say command used by {ctx.author} in {ctx.guild.name}")
 
 # ==================== REACTION ROLES ====================
-class ReactionButton(Button):
-    def __init__(self, emoji: str, role_id: int):
-        super().__init__(emoji=emoji, style=discord.ButtonStyle.gray)
-        self.role_id = role_id
-    
-    async def callback(self, interaction: discord.Interaction):
-        role = interaction.guild.get_role(self.role_id)
-        if not role:
-            return await interaction.response.send_message("❌ Rôle introuvable.", ephemeral=True)
-        
-        try:
-            if role in interaction.user.roles:
-                await interaction.user.remove_roles(role, reason="Rôle réaction")
-                await interaction.response.send_message(f"❌ Rôle **{role.name}** retiré", ephemeral=True)
-            else:
-                await interaction.user.add_roles(role, reason="Rôle réaction")
-                await interaction.response.send_message(f"✅ Rôle **{role.name}** ajouté", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ Je n'ai pas les permissions pour gérer ce rôle.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Erreur : {e}", ephemeral=True)
-
 @bot.command(name="reactionrole")
 @commands.has_permissions(manage_roles=True)
 async def reactionrole(ctx, channel: Optional[discord.TextChannel] = None, emoji: Optional[str] = None, role: Optional[discord.Role] = None):
@@ -960,66 +1023,4 @@ if __name__ == "__main__":
         print("❌ Token Discord invalide. Vérifie ta variable d'environnement DISCORD_TOKEN.")
     except Exception as e:
         logger.critical(f"Fatal error: {e}", exc_info=e)
-        print(f"❌ Erreur fatale : {e}")TS ====================
-class CloseButton(Button):
-    def __init__(self):
-        super().__init__(label="Fermer le ticket", style=discord.ButtonStyle.red, emoji="🔒")
-    
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message("🔒 Ce ticket sera supprimé dans 5 secondes...", ephemeral=True)
-        await asyncio.sleep(5)
-        try:
-            await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
-            logger.info(f"Ticket {interaction.channel.name} closed by {interaction.user}")
-        except Exception as e:
-            logger.error(f"Error closing ticket: {e}")
-
-class TicketView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(CloseButton())
-
-@bot.command(name="ticket")
-async def ticket(ctx):
-    """Crée un ticket privé"""
-    for channel in ctx.guild.text_channels:
-        if f"ticket-{ctx.author.name}".lower() in channel.name.lower():
-            return await ctx.send(f"❌ Tu as déjà un ticket ouvert : {channel.mention}", delete_after=5)
-    
-    overwrites = {
-        ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    }
-    
-    try:
-        channel = await ctx.guild.create_text_channel(
-            name=f"ticket-{ctx.author.name}",
-            overwrites=overwrites,
-            reason=f"Ticket créé par {ctx.author}"
-        )
-        
-        ticket_roles = await get_conf(ctx.guild.id, "ticket_roles") or []
-        for role_id in ticket_roles:
-            role = ctx.guild.get_role(role_id)
-            if role:
-                await channel.set_permissions(role, read_messages=True, send_messages=True)
-        
-        embed = discord.Embed(
-            title="🎫 Ticket ouvert",
-            description=f"{ctx.author.mention}, explique ton problème ici.\nUn membre du staff va te répondre.",
-            color=discord.Color.green(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        embed.set_footer(text=f"Ticket de {ctx.author}", icon_url=ctx.author.display_avatar.url)
-        
-        await channel.send(embed=embed, view=TicketView())
-        await ctx.send(f"✅ Ticket créé : {channel.mention}", delete_after=5)
-        logger.info(f"Ticket created by {ctx.author} in {ctx.guild.name}")
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions pour créer un ticket.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors de la création du ticket : {e}")
-        logger.error(f"Ticket creation error: {e}")
-
-# ==================== TICKE
+        print(f"❌ Erreur fatale : {e}")
