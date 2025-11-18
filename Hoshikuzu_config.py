@@ -16,26 +16,23 @@ threading.Thread(target=keep_alive, daemon=True).start()
 
 # ==================== DATA ====================
 DATA_FILE = "hoshikuzu_data.json"
-
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"config": {}, "tickets": {}, "invites": {}, "roles_invites": {}, "temp_vocs": {}, "user_invites": {}, "allowed_links": {}, "reaction_roles": {}}
-
+    return {
+        "config": {}, "tickets": {}, "invites": {}, "roles_invites": {},
+        "temp_vocs": {}, "user_invites": {}, "allowed_links": {}, "reaction_roles": {}
+    }
 def save_data(d):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(d, f, indent=2, ensure_ascii=False)
-
 data = load_data()
-
 def get_conf(gid, key, default=None):
     return data.get("config", {}).get(str(gid), {}).get(key, default)
-
 def set_conf(gid, key, value):
     data.setdefault("config", {}).setdefault(str(gid), {})[key] = value
     save_data(data)
-
 def get_gconf(gid):
     return data.get("config", {}).get(str(gid), {})
 
@@ -64,7 +61,6 @@ async def send_log(guild, embed_or_file):
 async def on_ready():
     print(f"✅ Connecté comme {bot.user}")
     await bot.change_presence(activity=discord.Game(name="hoshikuzu | +help"))
-    # Charger les invitations au démarrage
     for guild in bot.guilds:
         try:
             invites = await guild.invites()
@@ -78,49 +74,79 @@ async def on_ready():
 async def help_cmd(ctx):
     e = discord.Embed(title="🌿 Commandes Hoshikuzu", color=discord.Color.green())
     e.add_field(name="📊 Configuration", value=(
-        "+config - Voir la config\n"
-        "+setwelcome #channel <embed/text>\n"
-        "+setleave #channel <embed/text>\n"
-        "+setlogs #channel\n"
-        "+setinvitation #channel"
+        "+config\n+setwelcome #channel <embed/text>\n+setleave #channel <embed/text>\n+setlogs #channel\n+setinvitation #channel"
     ), inline=False)
-    e.add_field(name="👥 Invitations", value=(
-        "+roleinvite <nombre> @role\n"
-        "+invites [@user]"
-    ), inline=False)
+    e.add_field(name="👥 Invitations", value="+roleinvite <nombre> @role\n+invites [@user]", inline=False)
     e.add_field(name="🔗 Liens", value="+allowlink #channel / +disallowlink #channel", inline=False)
     e.add_field(name="🔒 Modération", value="+lock / +unlock", inline=False)
     e.add_field(name="👤 Rôles", value="+role @user @role / +rolejoin @role", inline=False)
-    e.add_field(name="🎫 Tickets", value="+ticket / +ticketpanel / +close", inline=False)
+    e.add_field(name="🎫 Tickets", value="+ticket / +ticketpanel / +close / +ticketrole", inline=False)
     e.add_field(name="🎭 Rôles Réactions", value="+reactionrole / +listreactionroles", inline=False)
     e.add_field(name="💬 Utilitaires", value="+say <message>", inline=False)
     e.add_field(name="🧪 Tests", value="+testwelcome / +testleave", inline=False)
     e.add_field(name="🔊 Vocaux", value="+createvoc / +setupvoc", inline=False)
     await ctx.send(embed=e)
 
-# ==================== CONFIG ====================
-@bot.command(name="config")
-@commands.has_permissions(manage_guild=True)
-async def config_cmd(ctx):
-    conf = get_gconf(ctx.guild.id)
-    e = discord.Embed(title="⚙️ Configuration actuelle", color=discord.Color.green())
-    for key in ["logs_channel", "welcome_embed_channel", "welcome_text_channel", "leave_embed_channel", "leave_text_channel", "invitation_channel", "ticket_panel", "voc_trigger_channel", "auto_role"]:
-        val = conf.get(key)
-        if "role" in key and val:
-            e.add_field(name=key.replace("_", " ").title(), value=f"<@&{val}>", inline=False)
-        elif val:
-            e.add_field(name=key.replace("_channel", "").replace("_", " ").title(), value=f"<#{val}>", inline=False)
-    # Rôles invitations
-    roles_inv = data.get("roles_invites", {}).get(str(ctx.guild.id), {})
-    if roles_inv:
-        roles_text = "\n".join([f"{count} invites → <@&{role_id}>" for count, role_id in roles_inv.items()])
-        e.add_field(name="🎯 Rôles par invitations", value=roles_text, inline=False)
-    # Salons liens autorisés
-    allowed = data.get("allowed_links", {}).get(str(ctx.guild.id), [])
-    if allowed:
-        links_text = "\n".join([f"<#{cid}>" for cid in allowed])
-        e.add_field(name="🔗 Liens autorisés dans", value=links_text, inline=False)
-    await ctx.send(embed=e)
+# ==================== WELCOME / LEAVE ====================
+async def send_welcome(member):
+    conf = get_gconf(member.guild.id)
+    embed_ch_id = conf.get("welcome_embed_channel")
+    text_ch_id = conf.get("welcome_text_channel")
+    total_members = member.guild.member_count
+
+    if embed_ch_id:
+        ch = member.guild.get_channel(embed_ch_id)
+        if ch:
+            e = discord.Embed(
+                title="✨ Nouveau membre !",
+                description=f"{member.mention} a rejoint le serveur !",
+                color=discord.Color.green(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            e.set_footer(text=f"Nous sommes maintenant {total_members} membres")
+            await ch.send(embed=e)
+    if text_ch_id:
+        ch = member.guild.get_channel(text_ch_id)
+        if ch:
+            msg = (
+                f"{EMOJI} {member.mention} a rejoint le serveur !\n"
+                f"{EMOJI} Nous sommes maintenant **{total_members} membres**."
+            )
+            await ch.send(msg)
+
+async def send_leave(member):
+    conf = get_gconf(member.guild.id)
+    embed_ch_id = conf.get("leave_embed_channel")
+    text_ch_id = conf.get("leave_text_channel")
+    total_members = member.guild.member_count
+
+    if embed_ch_id:
+        ch = member.guild.get_channel(embed_ch_id)
+        if ch:
+            e = discord.Embed(
+                title="❌ Un membre nous quitte...",
+                description=f"{member.mention} a quitté le serveur.",
+                color=discord.Color.red(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            e.set_footer(text=f"Il reste {total_members} membres")
+            await ch.send(embed=e)
+    if text_ch_id:
+        ch = member.guild.get_channel(text_ch_id)
+        if ch:
+            msg = (
+                f"{EMOJI} {member.mention} a quitté le serveur.\n"
+                f"{EMOJI} Il reste maintenant **{total_members} membres**."
+            )
+            await ch.send(msg)
+
+@bot.event
+async def on_member_join(member):
+    await send_welcome(member)
+
+@bot.event
+async def on_member_remove(member):
+    await send_leave(member)
 
 # ==================== TICKETS ====================
 class CloseButton(Button):
@@ -144,6 +170,11 @@ async def ticket(ctx):
         ctx.guild.me: discord.PermissionOverwrite(read_messages=True)
     }
     channel = await ctx.guild.create_text_channel(name=f"ticket-{ctx.author.name}", overwrites=overwrites)
+    ticket_roles = get_conf(ctx.guild.id, "ticket_roles") or []
+    for role_id in ticket_roles:
+        role = ctx.guild.get_role(role_id)
+        if role:
+            await channel.set_permissions(role, read_messages=True, send_messages=True)
     embed = discord.Embed(title="🎫 Ticket ouvert", description=f"{ctx.author.mention}, explique ton problème ici.", color=discord.Color.green())
     await channel.send(embed=embed, view=TicketView())
     await ctx.send(f"✅ Ticket créé : {channel.mention}", delete_after=5)
@@ -151,16 +182,19 @@ async def ticket(ctx):
 @bot.command(name="ticketpanel")
 @commands.has_permissions(manage_guild=True)
 async def ticket_panel(ctx):
-    embed = discord.Embed(
-        title="🎫 Ouvre un ticket !",
-        description="Clique sur 🎫 pour créer un ticket privé !",
-        color=discord.Color.green()
-    )
-    msg = await ctx.send(embed=embed)
-    await msg.add_reaction("🎫")
+    embed = discord.Embed(title="🎫 Ouvre un ticket !", description="Clique sur le bouton ci-dessous pour créer un ticket privé !", color=discord.Color.green())
+    view = TicketView()
+    msg = await ctx.send(embed=embed, view=view)
     set_conf(ctx.guild.id, "ticket_panel", msg.id)
     set_conf(ctx.guild.id, "ticket_panel_channel", ctx.channel.id)
     await ctx.send("✅ Panel de tickets créé avec succès !")
+
+@bot.command(name="ticketrole")
+@commands.has_permissions(manage_guild=True)
+async def ticket_role(ctx, *roles: discord.Role):
+    role_ids = [role.id for role in roles]
+    set_conf(ctx.guild.id, "ticket_roles", role_ids)
+    await ctx.send(f"✅ Les rôles {', '.join([r.name for r in roles])} seront attribués dans les tickets.")
 
 @bot.command(name="close")
 async def close_ticket(ctx):
@@ -176,7 +210,7 @@ async def close_ticket(ctx):
     else:
         await ctx.send("❌ Cette commande ne fonctionne que dans un salon ticket.")
 
-# ==================== VOC TEMP ====================
+# ==================== VOC TEMPORAIRES ====================
 @bot.command(name="setupvoc")
 @commands.has_permissions(manage_guild=True)
 async def setup_voc(ctx, channel: discord.VoiceChannel):
@@ -196,13 +230,11 @@ async def create_voc(ctx):
 async def on_voice_state_update(member, before, after):
     guild = member.guild
     trigger_channel_id = get_conf(guild.id, "voc_trigger_channel")
-    # Création vocal temporaire
     if after.channel and after.channel.id == trigger_channel_id:
         voc = await guild.create_voice_channel(name=f"🔊 {member.display_name}", category=after.channel.category)
         data.setdefault("temp_vocs", {})[str(voc.id)] = {"owner": member.id, "created_at": datetime.datetime.utcnow().isoformat()}
         save_data(data)
         await member.move_to(voc)
-    # Suppression vocal vide
     if before.channel:
         channel_id = str(before.channel.id)
         if channel_id in data.get("temp_vocs", {}) and len(before.channel.members) == 0:
@@ -210,7 +242,7 @@ async def on_voice_state_update(member, before, after):
             del data["temp_vocs"][channel_id]
             save_data(data)
 
-# ==================== LINKS ====================
+# ==================== LIENS ====================
 @bot.command(name="allowlink")
 @commands.has_permissions(manage_guild=True)
 async def allow_link(ctx, channel: discord.TextChannel):
@@ -255,6 +287,50 @@ async def on_message(message):
                 await send_log(message.guild, e)
                 return
     await bot.process_commands(message)
+
+# ==================== SAY ====================
+@bot.command(name="say")
+@commands.has_permissions(manage_guild=True)
+async def say(ctx, *, msg):
+    await ctx.message.delete()
+    await ctx.send(msg)
+
+# ==================== LOCK / UNLOCK ====================
+@bot.command(name="lock")
+@commands.has_permissions(manage_channels=True)
+async def lock(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    await ctx.send("🔒 Salon verrouillé")
+
+@bot.command(name="unlock")
+@commands.has_permissions(manage_channels=True)
+async def unlock(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    await ctx.send("🔓 Salon déverrouillé")
+
+# ==================== ROLE REACTION ====================
+class ReactionButton(Button):
+    def __init__(self, emoji, role_id):
+        super().__init__(emoji=emoji, style=discord.ButtonStyle.gray)
+        self.role_id = role_id
+    async def callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role)
+            await interaction.response.send_message(f"❌ Rôle {role.name} retiré", ephemeral=True)
+        else:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ Rôle {role.name} ajouté", ephemeral=True)
+
+@bot.command(name="reactionrole")
+@commands.has_permissions(manage_guild=True)
+async def reactionrole(ctx, channel: discord.TextChannel, emoji, role: discord.Role):
+    view = View(timeout=None)
+    view.add_item(ReactionButton(emoji, role.id))
+    msg = await channel.send(f"Réagis avec {emoji} pour obtenir le rôle {role.name}", view=view)
+    data.setdefault("reaction_roles", {}).setdefault(str(ctx.guild.id), {})[str(msg.id)] = {"emoji": emoji, "role": role.id}
+    save_data(data)
+    await ctx.send("✅ Rôle réaction créé")
 
 # ==================== RUN ====================
 if __name__ == "__main__":
