@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Hoshikuzu Discord Bot - Version Complète avec Statistiques et Logs Avancés
-Bot de gestion de serveur Discord complet et sécurisé
-"""
+
 
 import os
 import json
