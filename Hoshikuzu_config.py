@@ -507,11 +507,15 @@ class ConfigView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(ChannelSelect("welcome_embed", "📨 Bienvenue (Embed)"))
-        self.add_item(ChannelSelect("welcome_text", "💬 Bienvenue (Texte)"))
         self.add_item(ChannelSelect("leave_embed", "📤 Départ (Embed)"))
-        self.add_item(ChannelSelect("leave_text", "💭 Départ (Texte)"))
         self.add_item(ChannelSelect("logs", "📊 Salon de Logs"))
         self.add_item(RoleSelect())
+
+class ConfigView2(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ChannelSelect("welcome_text", "💬 Bienvenue (Texte)"))
+        self.add_item(ChannelSelect("leave_text", "💭 Départ (Texte)"))
 
 async def update_config_embed(interaction: discord.Interaction):
     """Met à jour l'embed de configuration"""
@@ -540,6 +544,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketView())
     bot.add_view(ConfigView())
+    bot.add_view(ConfigView2())
 
 # ==================== TRACKING MESSAGES & VOCAL ====================
 @bot.event
@@ -719,7 +724,10 @@ async def config(ctx):
     
     role_join = conf.get("role_join")
     e.add_field(name="🎭 Rôle auto", value=f"<@&{role_join}>" if role_join else "`Non configuré`", inline=True)
+    
+    # Envoi en deux messages avec les deux views
     await ctx.send(embed=e, view=ConfigView())
+    await ctx.send("📝 **Configuration supplémentaire :**", view=ConfigView2())
 
 @bot.command(name="setwelcome")
 @commands.has_permissions(manage_guild=True)
