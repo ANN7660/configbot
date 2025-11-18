@@ -1,4 +1,4 @@
-<#!/usr/bin/env python3
+#!/usr/bin/env python3
 import os, json, threading, http.server, socketserver, asyncio, datetime, re
 import discord
 from discord.ext import commands
