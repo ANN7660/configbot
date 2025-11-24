@@ -9,4 +9,4 @@ PyJWT==2.8.0
 python-dotenv==1.0.0
 aiohttp==3.8.4
 python-multipart==0.0.6
-wavelink==3.0.0a8
+wavelink==3.4.1 
