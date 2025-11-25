@@ -10,6 +10,7 @@ import time
 from pyfiglet import Figlet
 import inspect
 
+
 # --- VARIABLES D'ÉTAT (Nécessaires pour ces commandes) ---
 # Si ces variables n'ont pas été remplies depuis le début du script,
 # assurez-vous de les copier/coller depuis la partie originale,
