@@ -10,14 +10,21 @@ import random
 from collections import defaultdict
 from flask import Flask
 from threading import Thread
+import io
+from PIL import Image, ImageDraw, ImageFont
 
 # ============= CONFIGURATION =============
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ============= DONNÉES =============
-economy_data = defaultdict(lambda: {"money": 0, "xp": 0, "level": 1, "rep": 0, "daily_claimed": None, "work_claimed": None})
+economy_data = defaultdict(lambda: {"money": 0, "bank": 0, "xp": 0, "level": 1, "rep": 0, "daily_claimed": None, "work_claimed": None, "inventory": []})
 warnings_data = defaultdict(list)
+tickets_data = defaultdict(list)
+stats_data = defaultdict(lambda: {"messages": 0, "voice_time": 0, "last_message": None})
+giveaways_data = []
+voice_tracking = {}
+
 server_config = defaultdict(lambda: {
     "welcome_channel": None,
     "leave_channel": None,
@@ -26,7 +33,16 @@ server_config = defaultdict(lambda: {
     "welcome_embed": None,
     "leave_embed": None,
     "automod_words": [],
-    "shop": []
+    "shop": [],
+    "ticket_category": None,
+    "ticket_role": None,
+    "ticket_counter": 0,
+    "tempvoc_channel": None,
+    "tempvoc_category": None,
+    "log_channels": {},
+    "autorole": None,
+    "level_roles": {},
+    "antispam": {"enabled": False, "messages": 5, "seconds": 5}
 })
 
 # ============= KEEP ALIVE (RENDER) =============
@@ -48,15 +64,45 @@ def keep_alive():
 async def on_ready():
     print(f'✅ {bot.user} est connecté!')
     auto_reboot.start()
+    check_giveaways.start()
     await bot.change_presence(activity=discord.Game(name="!help"))
 
 @tasks.loop(hours=23)
 async def auto_reboot():
     print("🔄 Auto-reboot check...")
 
+@tasks.loop(seconds=30)
+async def check_giveaways():
+    current_time = datetime.now()
+    for giveaway in giveaways_data[:]:
+        if current_time >= giveaway["end_time"]:
+            channel = bot.get_channel(giveaway["channel_id"])
+            if channel:
+                try:
+                    msg = await channel.fetch_message(giveaway["message_id"])
+                    reaction = discord.utils.get(msg.reactions, emoji="🎉")
+                    if reaction:
+                        users = [user async for user in reaction.users() if not user.bot]
+                        if users:
+                            winner = random.choice(users)
+                            await channel.send(f"🎉 Félicitations {winner.mention}! Vous avez gagné **{giveaway['prize']}**!")
+                        else:
+                            await channel.send("❌ Aucun participant au giveaway!")
+                except:
+                    pass
+            giveaways_data.remove(giveaway)
+
 @bot.event
 async def on_member_join(member):
     config = server_config[member.guild.id]
+    
+    # Autorole
+    if config.get("autorole"):
+        role = member.guild.get_role(config["autorole"])
+        if role:
+            await member.add_roles(role)
+    
+    # Welcome message
     channel_id = config.get("welcome_channel")
     if not channel_id:
         return
@@ -77,6 +123,9 @@ async def on_member_join(member):
     else:
         msg = config["welcome_msg"].replace("{user}", member.mention).replace("{server}", member.guild.name)
         await channel.send(msg)
+    
+    # Log
+    await log_action(member.guild, "membres", f"📥 {member.mention} a rejoint le serveur")
 
 @bot.event
 async def on_member_remove(member):
@@ -100,22 +149,81 @@ async def on_member_remove(member):
     else:
         msg = config["leave_msg"].replace("{user}", member.name).replace("{server}", member.guild.name)
         await channel.send(msg)
+    
+    await log_action(member.guild, "membres", f"📤 {member.name} a quitté le serveur")
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    config = server_config[member.guild.id]
+    
+    # Système de vocal temporaire
+    if after.channel and after.channel.id == config.get("tempvoc_channel"):
+        category = bot.get_channel(config.get("tempvoc_category"))
+        if not category:
+            category = after.channel.category
+        
+        temp_channel = await member.guild.create_voice_channel(
+            name=f"🎤 {member.display_name}",
+            category=category,
+            user_limit=10
+        )
+        await member.move_to(temp_channel)
+        
+        # Attendre que le salon se vide pour le supprimer
+        def check():
+            return len(temp_channel.members) == 0
+        
+        while len(temp_channel.members) > 0:
+            await asyncio.sleep(5)
+        
+        await temp_channel.delete()
+    
+    # Tracking temps vocal
+    user_key = f"{member.guild.id}_{member.id}"
+    
+    if before.channel is None and after.channel is not None:
+        voice_tracking[user_key] = datetime.now()
+    
+    elif before.channel is not None and after.channel is None:
+        if user_key in voice_tracking:
+            duration = (datetime.now() - voice_tracking[user_key]).total_seconds()
+            stats_data[user_key]["voice_time"] += duration
+            del voice_tracking[user_key]
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
     
-    # Automod
     config = server_config[message.guild.id]
+    user_key = f"{message.guild.id}_{message.author.id}"
+    
+    # Stats
+    stats_data[user_key]["messages"] += 1
+    stats_data[user_key]["last_message"] = datetime.now()
+    
+    # Antispam
+    antispam = config["antispam"]
+    if antispam["enabled"]:
+        recent_messages = [m for m in message.channel.history(limit=antispam["messages"]) 
+                          if m.author == message.author and 
+                          (datetime.now() - m.created_at).total_seconds() < antispam["seconds"]]
+        
+        if len(recent_messages) >= antispam["messages"]:
+            await message.channel.purge(limit=antispam["messages"], check=lambda m: m.author == message.author)
+            await message.channel.send(f"{message.author.mention}, stop le spam!", delete_after=5)
+            return
+    
+    # Automod
     for word in config["automod_words"]:
         if word.lower() in message.content.lower():
             await message.delete()
             await message.channel.send(f"{message.author.mention}, ce mot est interdit!", delete_after=5)
+            await log_action(message.guild, "modération", f"🚫 Message supprimé de {message.author.mention}: mot interdit")
             return
     
     # XP système
-    user_data = economy_data[f"{message.guild.id}_{message.author.id}"]
+    user_data = economy_data[user_key]
     xp_gain = random.randint(10, 25)
     user_data["xp"] += xp_gain
     
@@ -123,11 +231,54 @@ async def on_message(message):
     if user_data["xp"] >= xp_needed:
         user_data["level"] += 1
         user_data["xp"] = 0
+        
+        # Check level roles
+        level_roles = config.get("level_roles", {})
+        if user_data["level"] in level_roles:
+            role = message.guild.get_role(level_roles[user_data["level"]])
+            if role:
+                await message.author.add_roles(role)
+        
         await message.channel.send(f"🎉 {message.author.mention} a atteint le niveau {user_data['level']}!")
     
     await bot.process_commands(message)
 
-# ============= HELP COMMAND =============
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot:
+        return
+    await log_action(message.guild, "messages", f"🗑️ Message supprimé dans {message.channel.mention}\n**Auteur:** {message.author.mention}\n**Contenu:** {message.content[:100]}")
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot or before.content == after.content:
+        return
+    await log_action(before.guild, "messages", f"✏️ Message édité dans {before.channel.mention}\n**Auteur:** {before.author.mention}\n**Avant:** {before.content[:50]}\n**Après:** {after.content[:50]}")
+
+# ============= LOG SYSTEM =============
+async def log_action(guild, log_type, message):
+    config = server_config[guild.id]
+    log_channel_id = config["log_channels"].get(log_type)
+    
+    if not log_channel_id:
+        return
+    
+    channel = bot.get_channel(log_channel_id)
+    if channel:
+        embed = discord.Embed(description=message, color=discord.Color.blue(), timestamp=datetime.now())
+        await channel.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setlog(ctx, log_type: str, channel: discord.TextChannel):
+    valid_types = ["messages", "membres", "modération", "vocal"]
+    if log_type not in valid_types:
+        return await ctx.send(f"❌ Types valides: {', '.join(valid_types)}")
+    
+    server_config[ctx.guild.id]["log_channels"][log_type] = channel.id
+    await ctx.send(f"✅ Logs **{log_type}** configurés dans {channel.mention}")
+
+# ============= HELP COMMAND (Updated) =============
 class HelpView(View):
     def __init__(self):
         super().__init__(timeout=180)
@@ -153,21 +304,30 @@ class HelpView(View):
         self.category = "utility"
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
     
+    @discord.ui.button(label="Systèmes", style=discord.ButtonStyle.primary, emoji="⚙️")
+    async def systems_btn(self, interaction: discord.Interaction, button: Button):
+        self.category = "systems"
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
     def get_embed(self):
         embeds = {
             "moderation": discord.Embed(
                 title="🛡️ Commandes de Modération",
                 description=(
-                    "**!mute** <membre> <temps> [raison] - Met en sourdine un membre\n"
-                    "**!unmute** <membre> - Retire la sourdine\n"
-                    "**!kick** <membre> [raison] - Expulse un membre\n"
-                    "**!ban** <membre> [raison] - Banni un membre\n"
-                    "**!lock** [salon] - Verrouille un salon\n"
-                    "**!unlock** [salon] - Déverrouille un salon\n"
-                    "**!clear** <nombre> - Supprime des messages\n"
-                    "**!warn** <membre> <raison> - Avertit un membre\n"
-                    "**!warnings** <membre> - Affiche les avertissements\n"
-                    "**!clearwarn** <membre> [index] - Retire un avertissement"
+                    "**!mute** <membre> <temps> [raison]\n"
+                    "**!unmute** <membre>\n"
+                    "**!kick** <membre> [raison]\n"
+                    "**!ban** <membre> [raison]\n"
+                    "**!lock** [salon]\n"
+                    "**!unlock** [salon]\n"
+                    "**!clear** <nombre>\n"
+                    "**!warn** <membre> <raison>\n"
+                    "**!warnings** <membre>\n"
+                    "**!clearwarn** <membre> [index]\n"
+                    "**!slowmode** <secondes>\n"
+                    "**!nuke**\n"
+                    "**!lockdown**\n"
+                    "**!antispam** <on/off>"
                 ),
                 color=discord.Color.blue()
             ),
@@ -175,46 +335,80 @@ class HelpView(View):
                 title="💰 Commandes d'Économie",
                 description=(
                     "**!daily** - Récompense journalière\n"
-                    "**!balance** [membre] - Affiche la monnaie\n"
-                    "**!rep** <membre> - Donne de la réputation\n"
-                    "**!shop** - Affiche la boutique\n"
-                    "**!buy** <id> - Achète un rôle\n"
-                    "**!dice** [montant] - Jeu de dés\n"
-                    "**!pay** <membre> <montant> - Transfère de l'argent\n"
-                    "**!leaderboard** - Classement des joueurs\n"
+                    "**!balance** [membre]\n"
+                    "**!rep** <membre>\n"
                     "**!work** - Gagne de l'argent\n"
-                    "**!beg** - Demande l'aumône"
+                    "**!beg** - Demande l'aumône\n"
+                    "**!pay** <membre> <montant>\n"
+                    "**!rob** <membre>\n"
+                    "**!deposit** <montant>\n"
+                    "**!withdraw** <montant>\n"
+                    "**!shop** - Boutique\n"
+                    "**!buy** <id>\n"
+                    "**!inventory**\n"
+                    "**!gift** <membre> <item>\n"
+                    "**!dice** [montant]\n"
+                    "**!slots** [mise]\n"
+                    "**!blackjack** [mise]\n"
+                    "**!leaderboard**"
                 ),
                 color=discord.Color.gold()
             ),
             "fun": discord.Embed(
-                title="🎮 Commandes Fun",
+                title="🎮 Commandes Fun & Jeux",
                 description=(
-                    "**!8ball** <question> - Boule magique\n"
-                    "**!joke** - Envoie une blague\n"
-                    "**!quote** - Citation inspirante\n"
-                    "**!ascii** <texte> - Convertit en ASCII art\n"
-                    "**!coinflip** - Lance une pièce\n"
-                    "**!rate** <chose> - Évalue quelque chose\n"
-                    "**!ship** <membre1> <membre2> - Calcule l'affinité\n"
-                    "**!choose** <opt1>, <opt2>... - Aide à choisir"
+                    "**!8ball** <question>\n"
+                    "**!joke**\n"
+                    "**!quote**\n"
+                    "**!ascii** <texte>\n"
+                    "**!coinflip**\n"
+                    "**!rate** <chose>\n"
+                    "**!ship** <membre1> <membre2>\n"
+                    "**!choose** <opt1>, <opt2>...\n"
+                    "**!rps** <pierre/papier/ciseaux>\n"
+                    "**!tictactoe** <membre>\n"
+                    "**!hangman**\n"
+                    "**!trivia**"
                 ),
                 color=discord.Color.red()
             ),
             "utility": discord.Embed(
                 title="🔧 Commandes Utilitaires",
                 description=(
-                    "**!userinfo** [membre] - Info sur un membre\n"
-                    "**!serverinfo** - Info sur le serveur\n"
-                    "**!timer** <temps> [raison] - Minuteur\n"
-                    "**!automod** add/list - Gère les mots interdits\n"
-                    "**!config** - Menu de configuration\n"
-                    "**!bvntext** [message] - Message de bienvenue\n"
-                    "**!bvnembed** [titre | description] - Embed de bienvenue\n"
-                    "**!leavetext** [message] - Message de départ\n"
-                    "**!leaveembed** [titre | description] - Embed de départ"
+                    "**!userinfo** [membre]\n"
+                    "**!serverinfo**\n"
+                    "**!serverstats**\n"
+                    "**!userstats** [membre]\n"
+                    "**!avatar** [membre]\n"
+                    "**!banner** [membre]\n"
+                    "**!rank** [membre]\n"
+                    "**!timer** <temps> [raison]\n"
+                    "**!remind** <durée> <message>\n"
+                    "**!poll** <question> | <opt1> | <opt2>...\n"
+                    "**!embed**\n"
+                    "**!announce** <salon> <message>\n"
+                    "**!reaction** <msg_id> <emojis>\n"
+                    "**!weather** <ville>\n"
+                    "**!translate** <langue> <texte>"
                 ),
                 color=discord.Color.greyple()
+            ),
+            "systems": discord.Embed(
+                title="⚙️ Systèmes & Configuration",
+                description=(
+                    "**!config** - Menu de configuration\n"
+                    "**!ticketsetup** - Configure les tickets\n"
+                    "**!tempvoc** <salon> - Vocal temporaire\n"
+                    "**!giveaway** <durée> <prix>\n"
+                    "**!setlog** <type> <salon>\n"
+                    "**!autorole** <role>\n"
+                    "**!setrankrole** <niveau> <role>\n"
+                    "**!reactionrole** - Reaction roles\n"
+                    "**!automod** add/list\n"
+                    "**!bvntext/bvnembed**\n"
+                    "**!leavetext/leaveembed**"
+                ),
+                color=discord.Color.purple()
             )
         }
         return embeds[self.category]
@@ -224,7 +418,7 @@ async def help(ctx):
     view = HelpView()
     await ctx.send(embed=view.get_embed(), view=view)
 
-# ============= CONFIG COMMAND =============
+# ============= CONFIG COMMAND (Updated) =============
 class ConfigView(View):
     def __init__(self, guild_id):
         super().__init__(timeout=300)
@@ -260,18 +454,37 @@ class ConfigView(View):
         except asyncio.TimeoutError:
             await interaction.followup.send("❌ Temps écoulé!", ephemeral=True)
     
-    @discord.ui.button(label="Voir Config", style=discord.ButtonStyle.success, emoji="📋")
+    @discord.ui.button(label="Rôle Ticket", style=discord.ButtonStyle.success, emoji="🎫")
+    async def ticket_role(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("Mentionnez le rôle à notifier pour les tickets:", ephemeral=True)
+        
+        def check(m):
+            return m.author == interaction.user and m.channel == interaction.channel
+        
+        try:
+            msg = await bot.wait_for('message', check=check, timeout=60)
+            if msg.role_mentions:
+                server_config[self.guild_id]["ticket_role"] = msg.role_mentions[0].id
+                await interaction.followup.send(f"✅ Rôle ticket défini: {msg.role_mentions[0].mention}", ephemeral=True)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("❌ Temps écoulé!", ephemeral=True)
+    
+    @discord.ui.button(label="Voir Config", style=discord.ButtonStyle.secondary, emoji="📋")
     async def view_config(self, interaction: discord.Interaction, button: Button):
         config = server_config[self.guild_id]
         embed = discord.Embed(title="⚙️ Configuration du Serveur", color=discord.Color.blue())
         
         welcome_ch = bot.get_channel(config["welcome_channel"]) if config["welcome_channel"] else None
         leave_ch = bot.get_channel(config["leave_channel"]) if config["leave_channel"] else None
+        ticket_role = interaction.guild.get_role(config["ticket_role"]) if config["ticket_role"] else None
+        tempvoc_ch = bot.get_channel(config["tempvoc_channel"]) if config["tempvoc_channel"] else None
         
-        embed.add_field(name="Salon Bienvenue", value=welcome_ch.mention if welcome_ch else "Non défini", inline=False)
-        embed.add_field(name="Salon Départ", value=leave_ch.mention if leave_ch else "Non défini", inline=False)
-        embed.add_field(name="Mots Interdits", value=f"{len(config['automod_words'])} mots", inline=False)
-        embed.add_field(name="Articles Boutique", value=f"{len(config['shop'])} articles", inline=False)
+        embed.add_field(name="👋 Salon Bienvenue", value=welcome_ch.mention if welcome_ch else "Non défini", inline=False)
+        embed.add_field(name="👋 Salon Départ", value=leave_ch.mention if leave_ch else "Non défini", inline=False)
+        embed.add_field(name="🎫 Rôle Ticket", value=ticket_role.mention if ticket_role else "Non défini", inline=False)
+        embed.add_field(name="🎤 Vocal Temporaire", value=tempvoc_ch.mention if tempvoc_ch else "Non défini", inline=False)
+        embed.add_field(name="🚫 Mots Interdits", value=f"{len(config['automod_words'])} mots", inline=True)
+        embed.add_field(name="🛒 Articles Boutique", value=f"{len(config['shop'])} articles", inline=True)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -285,582 +498,1101 @@ async def config(ctx):
         color=discord.Color.blue()
     )
     await ctx.send(embed=embed, view=view)
-
-# ============= MODERATION COMMANDS =============
-@bot.command()
-@commands.has_permissions(moderate_members=True)
-async def mute(ctx, member: discord.Member, duration: str, *, reason="Aucune raison"):
-    time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    unit = duration[-1]
-    if unit not in time_units:
-        return await ctx.send("❌ Format: 10s, 5m, 2h, 1d")
+# ============= SYSTÈME DE TICKETS =============
+class TicketView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
     
-    amount = int(duration[:-1])
-    seconds = amount * time_units[unit]
-    
-    await member.timeout(timedelta(seconds=seconds), reason=reason)
-    embed = discord.Embed(title="🔇 Membre Muté", color=discord.Color.orange())
-    embed.add_field(name="Membre", value=member.mention, inline=False)
-    embed.add_field(name="Durée", value=duration, inline=False)
-    embed.add_field(name="Raison", value=reason, inline=False)
-    embed.add_field(name="Modérateur", value=ctx.author.mention, inline=False)
-    await ctx.send(embed=embed)
-
-@bot.command()
-@commands.has_permissions(moderate_members=True)
-async def unmute(ctx, member: discord.Member):
-    await member.timeout(None)
-    await ctx.send(f"✅ {member.mention} n'est plus en sourdine.")
-
-@bot.command()
-@commands.has_permissions(kick_members=True)
-async def kick(ctx, member: discord.Member, *, reason="Aucune raison"):
-    await member.kick(reason=reason)
-    embed = discord.Embed(title="👢 Membre Expulsé", color=discord.Color.red())
-    embed.add_field(name="Membre", value=f"{member}", inline=False)
-    embed.add_field(name="Raison", value=reason, inline=False)
-    await ctx.send(embed=embed)
-
-@bot.command()
-@commands.has_permissions(ban_members=True)
-async def ban(ctx, member: discord.Member, *, reason="Aucune raison"):
-    await member.ban(reason=reason)
-    embed = discord.Embed(title="🔨 Membre Banni", color=discord.Color.dark_red())
-    embed.add_field(name="Membre", value=f"{member}", inline=False)
-    embed.add_field(name="Raison", value=reason, inline=False)
-    await ctx.send(embed=embed)
-
-@bot.command()
-@commands.has_permissions(manage_channels=True)
-async def lock(ctx, channel: discord.TextChannel = None):
-    channel = channel or ctx.channel
-    await channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send(f"🔒 {channel.mention} est maintenant verrouillé.")
-
-@bot.command()
-@commands.has_permissions(manage_channels=True)
-async def unlock(ctx, channel: discord.TextChannel = None):
-    channel = channel or ctx.channel
-    await channel.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send(f"🔓 {channel.mention} est maintenant déverrouillé.")
-
-@bot.command()
-@commands.has_permissions(manage_messages=True)
-async def clear(ctx, amount: int):
-    deleted = await ctx.channel.purge(limit=amount + 1)
-    msg = await ctx.send(f"🗑️ {len(deleted)-1} messages supprimés.")
-    await asyncio.sleep(3)
-    await msg.delete()
-
-@bot.command()
-@commands.has_permissions(moderate_members=True)
-async def warn(ctx, member: discord.Member, *, reason):
-    key = f"{ctx.guild.id}_{member.id}"
-    warnings_data[key].append({
-        "reason": reason,
-        "moderator": str(ctx.author),
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-    })
-    await ctx.send(f"⚠️ {member.mention} a reçu un avertissement.\n**Raison:** {reason}")
-
-@bot.command()
-async def warnings(ctx, member: discord.Member):
-    key = f"{ctx.guild.id}_{member.id}"
-    warns = warnings_data[key]
-    
-    if not warns:
-        return await ctx.send(f"{member.mention} n'a aucun avertissement.")
-    
-    embed = discord.Embed(title=f"⚠️ Avertissements de {member}", color=discord.Color.orange())
-    for i, warn in enumerate(warns, 1):
-        embed.add_field(
-            name=f"#{i} - {warn['date']}",
-            value=f"**Raison:** {warn['reason']}\n**Par:** {warn['moderator']}",
-            inline=False
+    @discord.ui.button(label="Créer un Ticket", style=discord.ButtonStyle.success, emoji="🎫", custom_id="create_ticket")
+    async def create_ticket(self, interaction: discord.Interaction, button: Button):
+        config = server_config[interaction.guild.id]
+        
+        if not config.get("ticket_category"):
+            return await interaction.response.send_message("❌ Système de tickets non configuré!", ephemeral=True)
+        
+        # Vérifier si l'utilisateur a déjà un ticket ouvert
+        for ticket in tickets_data[interaction.guild.id]:
+            channel = interaction.guild.get_channel(ticket["channel_id"])
+            if channel and ticket["user_id"] == interaction.user.id:
+                return await interaction.response.send_message(f"❌ Vous avez déjà un ticket ouvert: {channel.mention}", ephemeral=True)
+        
+        category = interaction.guild.get_channel(config["ticket_category"])
+        if not category:
+            return await interaction.response.send_message("❌ Catégorie de tickets introuvable!", ephemeral=True)
+        
+        config["ticket_counter"] += 1
+        ticket_number = config["ticket_counter"]
+        
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        
+        if config.get("ticket_role"):
+            role = interaction.guild.get_role(config["ticket_role"])
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        
+        ticket_channel = await category.create_text_channel(
+            name=f"ticket-{ticket_number}",
+            overwrites=overwrites
         )
-    await ctx.send(embed=embed)
+        
+        tickets_data[interaction.guild.id].append({
+            "channel_id": ticket_channel.id,
+            "user_id": interaction.user.id,
+            "created_at": datetime.now()
+        })
+        
+        embed = discord.Embed(
+            title=f"🎫 Ticket #{ticket_number}",
+            description=f"Bienvenue {interaction.user.mention}!\n\nUn membre du staff va bientôt vous répondre.\nDécrivez votre problème en détail.",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f"Ticket créé par {interaction.user}")
+        
+        close_view = TicketCloseView()
+        await ticket_channel.send(embed=embed, view=close_view)
+        
+        if config.get("ticket_role"):
+            role = interaction.guild.get_role(config["ticket_role"])
+            if role:
+                await ticket_channel.send(f"{role.mention}")
+        
+        await interaction.response.send_message(f"✅ Ticket créé: {ticket_channel.mention}", ephemeral=True)
+        await log_action(interaction.guild, "modération", f"🎫 Ticket créé par {interaction.user.mention}")
+
+class TicketCloseView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="Fermer le Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, button: Button):
+        for ticket in tickets_data[interaction.guild.id]:
+            if ticket["channel_id"] == interaction.channel.id:
+                tickets_data[interaction.guild.id].remove(ticket)
+                break
+        
+        await interaction.response.send_message("🔒 Fermeture du ticket dans 5 secondes...")
+        await asyncio.sleep(5)
+        await log_action(interaction.guild, "modération", f"🎫 Ticket fermé par {interaction.user.mention}")
+        await interaction.channel.delete()
 
 @bot.command()
-@commands.has_permissions(moderate_members=True)
-async def clearwarn(ctx, member: discord.Member, index: int = None):
-    key = f"{ctx.guild.id}_{member.id}"
+@commands.has_permissions(administrator=True)
+async def ticketsetup(ctx):
+    config = server_config[ctx.guild.id]
     
-    if index is None:
-        warnings_data[key] = []
-        await ctx.send(f"✅ Tous les avertissements de {member.mention} ont été supprimés.")
+    embed = discord.Embed(
+        title="🎫 Système de Tickets",
+        description="Cliquez sur le bouton ci-dessous pour créer un ticket et contacter le staff!",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text=f"Serveur: {ctx.guild.name}")
+    
+    view = TicketView()
+    await ctx.send(embed=embed, view=view)
+    await ctx.message.delete()
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def ticketcategory(ctx, category: discord.CategoryChannel):
+    server_config[ctx.guild.id]["ticket_category"] = category.id
+    await ctx.send(f"✅ Catégorie des tickets définie: {category.name}")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def ticketrole(ctx, role: discord.Role):
+    server_config[ctx.guild.id]["ticket_role"] = role.id
+    await ctx.send(f"✅ Rôle des tickets défini: {role.mention}")
+
+# ============= VOCAL TEMPORAIRE =============
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def tempvoc(ctx, channel: discord.VoiceChannel, category: discord.CategoryChannel = None):
+    server_config[ctx.guild.id]["tempvoc_channel"] = channel.id
+    if category:
+        server_config[ctx.guild.id]["tempvoc_category"] = category.id
+    await ctx.send(f"✅ Vocal temporaire configuré sur {channel.mention}")
+
+# ============= MODÉRATION AVANCÉE =============
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def slowmode(ctx, seconds: int):
+    if seconds < 0 or seconds > 21600:
+        return await ctx.send("❌ Le slowmode doit être entre 0 et 21600 secondes (6h)")
+    
+    await ctx.channel.edit(slowmode_delay=seconds)
+    if seconds == 0:
+        await ctx.send("✅ Slowmode désactivé!")
     else:
-        if 1 <= index <= len(warnings_data[key]):
-            warnings_data[key].pop(index - 1)
-            await ctx.send(f"✅ Avertissement #{index} supprimé pour {member.mention}.")
+        await ctx.send(f"⏱️ Slowmode activé: {seconds} secondes")
+    await log_action(ctx.guild, "modération", f"⏱️ Slowmode défini à {seconds}s dans {ctx.channel.mention} par {ctx.author.mention}")
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def nuke(ctx):
+    confirm_msg = await ctx.send("⚠️ **ATTENTION!** Cette action va supprimer et recréer le salon (tous les messages seront perdus).\nConfirmez en réagissant avec ✅")
+    await confirm_msg.add_reaction("✅")
+    await confirm_msg.add_reaction("❌")
+    
+    def check(reaction, user):
+        return user == ctx.author and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == confirm_msg.id
+    
+    try:
+        reaction, user = await bot.wait_for('reaction_add', timeout=30, check=check)
+        
+        if str(reaction.emoji) == "✅":
+            position = ctx.channel.position
+            new_channel = await ctx.channel.clone(reason=f"Nuke par {ctx.author}")
+            await ctx.channel.delete()
+            await new_channel.edit(position=position)
+            await new_channel.send("💥 Salon nucléarisé!")
+            await log_action(ctx.guild, "modération", f"💥 Salon {ctx.channel.name} nuke par {ctx.author.mention}")
         else:
-            await ctx.send("❌ Index invalide.")
-
-# ============= ECONOMY COMMANDS =============
-@bot.command()
-async def daily(ctx):
-    key = f"{ctx.guild.id}_{ctx.author.id}"
-    user_data = economy_data[key]
-    
-    last_claim = user_data.get("daily_claimed")
-    if last_claim:
-        next_claim = datetime.fromisoformat(last_claim) + timedelta(days=1)
-        if datetime.now() < next_claim:
-            remaining = next_claim - datetime.now()
-            hours, remainder = divmod(int(remaining.total_seconds()), 3600)
-            minutes = remainder // 60
-            return await ctx.send(f"⏰ Revenez dans {hours}h {minutes}m pour votre récompense quotidienne!")
-    
-    reward = random.randint(500, 1000)
-    user_data["money"] += reward
-    user_data["daily_claimed"] = datetime.now().isoformat()
-    
-    embed = discord.Embed(title="🎁 Récompense Quotidienne", color=discord.Color.green())
-    embed.description = f"Vous avez reçu **{reward}€**!"
-    await ctx.send(embed=embed)
-
-@bot.command(aliases=["bal"])
-async def balance(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    key = f"{ctx.guild.id}_{member.id}"
-    user_data = economy_data[key]
-    
-    embed = discord.Embed(title=f"💰 Profil de {member.name}", color=discord.Color.gold())
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Argent", value=f"{user_data['money']}€", inline=True)
-    embed.add_field(name="Niveau", value=user_data['level'], inline=True)
-    embed.add_field(name="XP", value=f"{user_data['xp']}/{user_data['level']*100}", inline=True)
-    embed.add_field(name="Réputation", value=user_data['rep'], inline=True)
-    await ctx.send(embed=embed)
+            await confirm_msg.delete()
+            await ctx.send("❌ Nuke annulé.")
+    except asyncio.TimeoutError:
+        await confirm_msg.delete()
+        await ctx.send("⏰ Temps écoulé!")
 
 @bot.command()
-async def rep(ctx, member: discord.Member):
+@commands.has_permissions(administrator=True)
+async def lockdown(ctx):
+    locked = 0
+    for channel in ctx.guild.text_channels:
+        try:
+            await channel.set_permissions(ctx.guild.default_role, send_messages=False)
+            locked += 1
+        except:
+            pass
+    
+    await ctx.send(f"🔒 **LOCKDOWN ACTIVÉ!** {locked} salons verrouillés.")
+    await log_action(ctx.guild, "modération", f"🔒 Lockdown activé par {ctx.author.mention}")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def antispam(ctx, mode: str):
+    if mode.lower() == "on":
+        server_config[ctx.guild.id]["antispam"]["enabled"] = True
+        await ctx.send("✅ Anti-spam activé!")
+    elif mode.lower() == "off":
+        server_config[ctx.guild.id]["antispam"]["enabled"] = False
+        await ctx.send("✅ Anti-spam désactivé!")
+    else:
+        await ctx.send("❌ Utilisez: !antispam on/off")
+
+# ============= ÉCONOMIE AVANCÉE =============
+@bot.command()
+async def rob(ctx, member: discord.Member):
     if member == ctx.author:
-        return await ctx.send("❌ Vous ne pouvez pas vous donner de réputation!")
+        return await ctx.send("❌ Vous ne pouvez pas vous voler vous-même!")
     
-    key = f"{ctx.guild.id}_{member.id}"
-    economy_data[key]["rep"] += 1
-    await ctx.send(f"⭐ Vous avez donné 1 point de réputation à {member.mention}!")
+    if member.bot:
+        return await ctx.send("❌ Vous ne pouvez pas voler un bot!")
+    
+    robber_key = f"{ctx.guild.id}_{ctx.author.id}"
+    victim_key = f"{ctx.guild.id}_{member.id}"
+    
+    robber_data = economy_data[robber_key]
+    victim_data = economy_data[victim_key]
+    
+    if robber_data["money"] < 500:
+        return await ctx.send("❌ Vous avez besoin d'au moins 500€ pour tenter un vol!")
+    
+    if victim_data["money"] < 200:
+        return await ctx.send(f"❌ {member.mention} n'a pas assez d'argent à voler!")
+    
+    success_rate = random.random()
+    
+    if success_rate > 0.5:
+        amount = random.randint(100, min(victim_data["money"], 1000))
+        victim_data["money"] -= amount
+        robber_data["money"] += amount
+        await ctx.send(f"💰 Succès! Vous avez volé {amount}€ à {member.mention}!")
+    else:
+        fine = random.randint(200, 500)
+        robber_data["money"] -= fine
+        await ctx.send(f"🚔 Vous vous êtes fait attraper! Amende de {fine}€")
 
 @bot.command()
-async def shop(ctx):
-    config = server_config[ctx.guild.id]
-    shop_items = config["shop"]
-    
-    if not shop_items:
-        return await ctx.send("🛒 La boutique est vide!")
-    
-    embed = discord.Embed(title="🛒 Boutique du Serveur", color=discord.Color.blue())
-    for item in shop_items:
-        role = ctx.guild.get_role(item["role_id"])
-        if role:
-            embed.add_field(
-                name=f"{role.name}",
-                value=f"Prix: {item['price']}€\nID: {item['role_id']}",
-                inline=False
-            )
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def buy(ctx, role_id: int):
-    config = server_config[ctx.guild.id]
-    item = next((i for i in config["shop"] if i["role_id"] == role_id), None)
-    
-    if not item:
-        return await ctx.send("❌ Cet article n'existe pas!")
-    
+async def deposit(ctx, amount: str):
     key = f"{ctx.guild.id}_{ctx.author.id}"
     user_data = economy_data[key]
     
-    if user_data["money"] < item["price"]:
-        return await ctx.send(f"❌ Vous n'avez pas assez d'argent! (Besoin: {item['price']}€)")
-    
-    role = ctx.guild.get_role(role_id)
-    if not role:
-        return await ctx.send("❌ Ce rôle n'existe plus!")
-    
-    if role in ctx.author.roles:
-        return await ctx.send("❌ Vous avez déjà ce rôle!")
-    
-    user_data["money"] -= item["price"]
-    await ctx.author.add_roles(role)
-    await ctx.send(f"✅ Vous avez acheté le rôle {role.mention}!")
-
-@bot.command()
-async def dice(ctx, amount: int = 100):
-    key = f"{ctx.guild.id}_{ctx.author.id}"
-    user_data = economy_data[key]
+    if amount.lower() == "all":
+        amount = user_data["money"]
+    else:
+        amount = int(amount)
     
     if amount > user_data["money"]:
         return await ctx.send("❌ Vous n'avez pas assez d'argent!")
     
-    result = random.randint(1, 6)
-    
-    if result >= 4:
-        winnings = amount * 2
-        user_data["money"] += amount
-        await ctx.send(f"🎲 Vous avez obtenu **{result}**! Vous gagnez {winnings}€!")
-    else:
-        user_data["money"] -= amount
-        await ctx.send(f"🎲 Vous avez obtenu **{result}**... Vous perdez {amount}€.")
+    user_data["money"] -= amount
+    user_data["bank"] += amount
+    await ctx.send(f"🏦 Vous avez déposé {amount}€ à la banque!")
 
 @bot.command()
-async def pay(ctx, member: discord.Member, amount: int):
-    if member == ctx.author:
-        return await ctx.send("❌ Vous ne pouvez pas vous payer vous-même!")
+async def withdraw(ctx, amount: str):
+    key = f"{ctx.guild.id}_{ctx.author.id}"
+    user_data = economy_data[key]
     
-    key_sender = f"{ctx.guild.id}_{ctx.author.id}"
-    key_receiver = f"{ctx.guild.id}_{member.id}"
+    if amount.lower() == "all":
+        amount = user_data["bank"]
+    else:
+        amount = int(amount)
     
-    if economy_data[key_sender]["money"] < amount:
+    if amount > user_data["bank"]:
+        return await ctx.send("❌ Vous n'avez pas assez d'argent en banque!")
+    
+    user_data["bank"] -= amount
+    user_data["money"] += amount
+    await ctx.send(f"🏦 Vous avez retiré {amount}€ de la banque!")
+
+@bot.command()
+async def slots(ctx, bet: int = 100):
+    key = f"{ctx.guild.id}_{ctx.author.id}"
+    user_data = economy_data[key]
+    
+    if bet > user_data["money"]:
         return await ctx.send("❌ Vous n'avez pas assez d'argent!")
     
-    economy_data[key_sender]["money"] -= amount
-    economy_data[key_receiver]["money"] += amount
-    await ctx.send(f"✅ Vous avez envoyé {amount}€ à {member.mention}!")
+    if bet < 50:
+        return await ctx.send("❌ Mise minimum: 50€")
+    
+    symbols = ["🍒", "🍋", "🍊", "🍇", "💎", "7️⃣"]
+    result = [random.choice(symbols) for _ in range(3)]
+    
+    embed = discord.Embed(title="🎰 Machine à Sous", color=discord.Color.gold())
+    embed.description = f"**[ {result[0]} | {result[1]} | {result[2]} ]**"
+    
+    if result[0] == result[1] == result[2]:
+        if result[0] == "💎":
+            winnings = bet * 10
+            embed.add_field(name="💎 JACKPOT! 💎", value=f"Vous gagnez {winnings}€!")
+            embed.color = discord.Color.purple()
+        elif result[0] == "7️⃣":
+            winnings = bet * 7
+            embed.add_field(name="🎉 777! 🎉", value=f"Vous gagnez {winnings}€!")
+            embed.color = discord.Color.red()
+        else:
+            winnings = bet * 3
+            embed.add_field(name="✨ Trois identiques!", value=f"Vous gagnez {winnings}€!")
+            embed.color = discord.Color.green()
+        user_data["money"] += winnings
+    elif result[0] == result[1] or result[1] == result[2]:
+        winnings = bet
+        embed.add_field(name="👍 Deux identiques", value=f"Vous récupérez votre mise: {winnings}€")
+        embed.color = discord.Color.blue()
+    else:
+        user_data["money"] -= bet
+        embed.add_field(name="❌ Perdu!", value=f"Vous perdez {bet}€")
+        embed.color = discord.Color.red()
+    
+    await ctx.send(embed=embed)
 
-@bot.command(aliases=["top"])
-async def leaderboard(ctx, type="money"):
-    guild_users = {k: v for k, v in economy_data.items() if k.startswith(f"{ctx.guild.id}_")}
+@bot.command()
+async def blackjack(ctx, bet: int = 100):
+    key = f"{ctx.guild.id}_{ctx.author.id}"
+    user_data = economy_data[key]
     
-    if not guild_users:
-        return await ctx.send("❌ Aucune donnée disponible!")
+    if bet > user_data["money"]:
+        return await ctx.send("❌ Vous n'avez pas assez d'argent!")
     
-    sorted_users = sorted(guild_users.items(), key=lambda x: x[1][type], reverse=True)[:10]
+    if bet < 50:
+        return await ctx.send("❌ Mise minimum: 50€")
+    
+    cards = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"] * 4
+    
+    def card_value(hand):
+        value = 0
+        aces = 0
+        for card in hand:
+            if card in ["J", "Q", "K"]:
+                value += 10
+            elif card == "A":
+                aces += 1
+                value += 11
+            else:
+                value += int(card)
+        
+        while value > 21 and aces:
+            value -= 10
+            aces -= 1
+        
+        return value
+    
+    player_hand = [random.choice(cards), random.choice(cards)]
+    dealer_hand = [random.choice(cards), random.choice(cards)]
+    
+    player_value = card_value(player_hand)
+    dealer_value = card_value(dealer_hand)
+    
+    embed = discord.Embed(title="🃏 Blackjack", color=discord.Color.green())
+    embed.add_field(name="Vos cartes", value=f"{' '.join(player_hand)} (Total: {player_value})", inline=False)
+    embed.add_field(name="Carte du croupier", value=f"{dealer_hand[0]} ?", inline=False)
+    
+    if player_value == 21:
+        winnings = int(bet * 2.5)
+        user_data["money"] += winnings
+        embed.add_field(name="🎉 BLACKJACK!", value=f"Vous gagnez {winnings}€!", inline=False)
+        return await ctx.send(embed=embed)
+    
+    class BlackjackView(View):
+        def __init__(self):
+            super().__init__(timeout=60)
+            self.value = None
+        
+        @discord.ui.button(label="Tirer", style=discord.ButtonStyle.success, emoji="🎴")
+        async def hit(self, interaction: discord.Interaction, button: Button):
+            if interaction.user != ctx.author:
+                return await interaction.response.send_message("❌ Ce n'est pas votre partie!", ephemeral=True)
+            
+            player_hand.append(random.choice(cards))
+            player_value = card_value(player_hand)
+            
+            if player_value > 21:
+                user_data["money"] -= bet
+                embed.clear_fields()
+                embed.add_field(name="Vos cartes", value=f"{' '.join(player_hand)} (Total: {player_value})", inline=False)
+                embed.add_field(name="❌ BUST!", value=f"Vous perdez {bet}€", inline=False)
+                embed.color = discord.Color.red()
+                self.stop()
+                await interaction.response.edit_message(embed=embed, view=None)
+            else:
+                embed.clear_fields()
+                embed.add_field(name="Vos cartes", value=f"{' '.join(player_hand)} (Total: {player_value})", inline=False)
+                embed.add_field(name="Carte du croupier", value=f"{dealer_hand[0]} ?", inline=False)
+                await interaction.response.edit_message(embed=embed, view=self)
+        
+        @discord.ui.button(label="Rester", style=discord.ButtonStyle.danger, emoji="✋")
+        async def stand(self, interaction: discord.Interaction, button: Button):
+            if interaction.user != ctx.author:
+                return await interaction.response.send_message("❌ Ce n'est pas votre partie!", ephemeral=True)
+            
+            while card_value(dealer_hand) < 17:
+                dealer_hand.append(random.choice(cards))
+            
+            dealer_value = card_value(dealer_hand)
+            player_value = card_value(player_hand)
+            
+            embed.clear_fields()
+            embed.add_field(name="Vos cartes", value=f"{' '.join(player_hand)} (Total: {player_value})", inline=False)
+            embed.add_field(name="Cartes du croupier", value=f"{' '.join(dealer_hand)} (Total: {dealer_value})", inline=False)
+            
+            if dealer_value > 21 or player_value > dealer_value:
+                winnings = bet * 2
+                user_data["money"] += winnings
+                embed.add_field(name="✅ VICTOIRE!", value=f"Vous gagnez {winnings}€!", inline=False)
+                embed.color = discord.Color.green()
+            elif player_value == dealer_value:
+                embed.add_field(name="🤝 ÉGALITÉ", value="Mise rendue", inline=False)
+                embed.color = discord.Color.blue()
+            else:
+                user_data["money"] -= bet
+                embed.add_field(name="❌ DÉFAITE", value=f"Vous perdez {bet}€", inline=False)
+                embed.color = discord.Color.red()
+            
+            self.stop()
+            await interaction.response.edit_message(embed=embed, view=None)
+    
+    view = BlackjackView()
+    await ctx.send(embed=embed, view=view)
+
+@bot.command()
+async def inventory(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    key = f"{ctx.guild.id}_{member.id}"
+    items = economy_data[key]["inventory"]
+    
+    if not items:
+        return await ctx.send(f"📦 {member.mention} n'a aucun objet dans son inventaire!")
+    
+    embed = discord.Embed(title=f"📦 Inventaire de {member.name}", color=discord.Color.blue())
+    for item in items:
+        embed.add_field(name=item["name"], value=f"ID: {item['id']}", inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def gift(ctx, member: discord.Member, item_id: int):
+    if member == ctx.author:
+        return await ctx.send("❌ Vous ne pouvez pas vous offrir un cadeau!")
+    
+    sender_key = f"{ctx.guild.id}_{ctx.author.id}"
+    receiver_key = f"{ctx.guild.id}_{member.id}"
+    
+    item = next((i for i in economy_data[sender_key]["inventory"] if i["id"] == item_id), None)
+    
+    if not item:
+        return await ctx.send("❌ Vous ne possédez pas cet objet!")
+    
+    economy_data[sender_key]["inventory"].remove(item)
+    economy_data[receiver_key]["inventory"].append(item)
+    
+    await ctx.send(f"🎁 Vous avez offert **{item['name']}** à {member.mention}!")
+
+# ============= JEUX =============
+@bot.command()
+async def rps(ctx, choice: str):
+    choices = {"pierre": "🪨", "papier": "📄", "ciseaux": "✂️"}
+    
+    if choice.lower() not in choices:
+        return await ctx.send("❌ Choisissez entre: pierre, papier, ciseaux")
+    
+    bot_choice = random.choice(list(choices.keys()))
+    
+    embed = discord.Embed(title="🎮 Pierre-Papier-Ciseaux", color=discord.Color.blue())
+    embed.add_field(name="Vous", value=f"{choices[choice.lower()]}", inline=True)
+    embed.add_field(name="Bot", value=f"{choices[bot_choice]}", inline=True)
+    
+    if choice.lower() == bot_choice:
+        result = "🤝 Égalité!"
+    elif (choice.lower() == "pierre" and bot_choice == "ciseaux") or \
+         (choice.lower() == "papier" and bot_choice == "pierre") or \
+         (choice.lower() == "ciseaux" and bot_choice == "papier"):
+        result = "✅ Vous gagnez!"
+    else:
+        result = "❌ Vous perdez!"
+    
+    embed.add_field(name="Résultat", value=result, inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def tictactoe(ctx, member: discord.Member):
+    if member == ctx.author:
+        return await ctx.send("❌ Vous ne pouvez pas jouer contre vous-même!")
+    
+    if member.bot:
+        return await ctx.send("❌ Vous ne pouvez pas jouer contre un bot!")
+    
+    board = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+    current_player = ctx.author
+    players = {ctx.author: "❌", member: "⭕"}
+    
+    def check_winner():
+        winning_combos = [
+            [0,1,2], [3,4,5], [6,7,8],  # rows
+            [0,3,6], [1,4,7], [2,5,8],  # columns
+            [0,4,8], [2,4,6]  # diagonals
+        ]
+        for combo in winning_combos:
+            if board[combo[0]] == board[combo[1]] == board[combo[2]]:
+                if board[combo[0]] in ["❌", "⭕"]:
+                    return True
+        return False
+    
+    def is_board_full():
+        return all(cell in ["❌", "⭕"] for cell in board)
+    
+    class TicTacToeButton(Button):
+        def __init__(self, position):
+            super().__init__(style=discord.ButtonStyle.secondary, label=str(position+1), custom_id=str(position))
+            self.position = position
+        
+        async def callback(self, interaction: discord.Interaction):
+            nonlocal current_player
+            
+            if interaction.user != current_player:
+                return await interaction.response.send_message("❌ Ce n'est pas votre tour!", ephemeral=True)
+            
+            if board[self.position] in ["❌", "⭕"]:
+                return await interaction.response.send_message("❌ Case déjà prise!", ephemeral=True)
+            
+            board[self.position] = players[current_player]
+            self.label = players[current_player]
+            self.disabled = True
+            
+            if check_winner():
+                for child in view.children:
+                    child.disabled = True
+                embed.description = f"🎉 {current_player.mention} a gagné!"
+                embed.color = discord.Color.green()
+                await interaction.response.edit_message(embed=embed, view=view)
+                return
+            
+            if is_board_full():
+                for child in view.children:
+                    child.disabled = True
+                embed.description = "🤝 Match nul!"
+                embed.color = discord.Color.blue()
+                await interaction.response.edit_message(embed=embed, view=view)
+                return
+            
+            current_player = member if current_player == ctx.author else ctx.author
+            embed.description = f"Tour de {current_player.mention} ({players[current_player]})"
+            await interaction.response.edit_message(embed=embed, view=view)
+    
+    view = View(timeout=300)
+    for i in range(9):
+        view.add_item(TicTacToeButton(i))
     
     embed = discord.Embed(
-        title=f"🏆 Classement - {type.capitalize()}",
-        color=discord.Color.gold()
+        title="⭕ Morpion ❌",
+        description=f"Tour de {current_player.mention} ({players[current_player]})",
+        color=discord.Color.blue()
     )
+    embed.add_field(name="Joueurs", value=f"{ctx.author.mention} (❌) vs {member.mention} (⭕)", inline=False)
     
-    for i, (key, data) in enumerate(sorted_users, 1):
+    await ctx.send(embed=embed, view=view)
+
+# Continue dans PARTIE 3...
+# ============= PARTIE 3/3 - Hangman, Trivia, Stats, Giveaways, Utilitaires =============
+
+# ============= HANGMAN =============
+hangman_games = {}
+
+@bot.command()
+async def hangman(ctx):
+    if ctx.author.id in hangman_games:
+        return await ctx.send("❌ Vous avez déjà une partie en cours!")
+    
+    words = ["python", "discord", "moderation", "economie", "giveaway", "ticket", "serveur", "commande"]
+    word = random.choice(words).upper()
+    
+    hangman_games[ctx.author.id] = {
+        "word": word,
+        "guessed": ["_"] * len(word),
+        "attempts": 6,
+        "letters_used": []
+    }
+    
+    embed = discord.Embed(title="🎮 Pendu", color=discord.Color.blue())
+    embed.add_field(name="Mot", value=" ".join(hangman_games[ctx.author.id]["guessed"]), inline=False)
+    embed.add_field(name="Tentatives restantes", value=f"{hangman_games[ctx.author.id]['attempts']} ❤️", inline=False)
+    embed.set_footer(text="Tapez une lettre pour deviner!")
+    
+    await ctx.send(embed=embed)
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and len(m.content) == 1
+    
+    while ctx.author.id in hangman_games:
+        try:
+            msg = await bot.wait_for('message', check=check, timeout=60)
+            letter = msg.content.upper()
+            
+            game = hangman_games[ctx.author.id]
+            
+            if letter in game["letters_used"]:
+                await ctx.send("❌ Lettre déjà utilisée!", delete_after=3)
+                continue
+            
+            game["letters_used"].append(letter)
+            
+            if letter in game["word"]:
+                for i, char in enumerate(game["word"]):
+                    if char == letter:
+                        game["guessed"][i] = letter
+                
+                if "_" not in game["guessed"]:
+                    embed = discord.Embed(title="🎉 VICTOIRE!", color=discord.Color.green())
+                    embed.add_field(name="Mot", value=" ".join(game["guessed"]), inline=False)
+                    await ctx.send(embed=embed)
+                    del hangman_games[ctx.author.id]
+                    break
+            else:
+                game["attempts"] -= 1
+                
+                if game["attempts"] == 0:
+                    embed = discord.Embed(title="💀 DÉFAITE!", color=discord.Color.red())
+                    embed.add_field(name="Le mot était", value=game["word"], inline=False)
+                    await ctx.send(embed=embed)
+                    del hangman_games[ctx.author.id]
+                    break
+            
+            embed = discord.Embed(title="🎮 Pendu", color=discord.Color.blue())
+            embed.add_field(name="Mot", value=" ".join(game["guessed"]), inline=False)
+            embed.add_field(name="Tentatives restantes", value=f"{game['attempts']} ❤️", inline=False)
+            embed.add_field(name="Lettres utilisées", value=" ".join(game["letters_used"]), inline=False)
+            await ctx.send(embed=embed)
+            
+        except asyncio.TimeoutError:
+            await ctx.send("⏰ Temps écoulé! Partie annulée.")
+            if ctx.author.id in hangman_games:
+                del hangman_games[ctx.author.id]
+            break
+
+# ============= TRIVIA =============
+@bot.command()
+async def trivia(ctx):
+    questions = [
+        {"q": "Quelle est la capitale de la France?", "a": ["paris"], "points": 10},
+        {"q": "Combien font 2+2?", "a": ["4", "quatre"], "points": 5},
+        {"q": "Quel est le langage de programmation de ce bot?", "a": ["python"], "points": 15},
+        {"q": "En quelle année Discord a été créé?", "a": ["2015"], "points": 20},
+        {"q": "Quel est l'animal le plus rapide du monde?", "a": ["guépard", "guepard"], "points": 15}
+    ]
+    
+    question = random.choice(questions)
+    
+    embed = discord.Embed(title="❓ Trivia", color=discord.Color.gold())
+    embed.add_field(name="Question", value=question["q"], inline=False)
+    embed.add_field(name="Points", value=f"🏆 {question['points']}", inline=False)
+    embed.set_footer(text="Vous avez 15 secondes pour répondre!")
+    
+    await ctx.send(embed=embed)
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+    
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=15)
+        
+        if msg.content.lower().strip() in question["a"]:
+            key = f"{ctx.guild.id}_{ctx.author.id}"
+            economy_data[key]["money"] += question["points"]
+            
+            embed = discord.Embed(title="✅ BONNE RÉPONSE!", color=discord.Color.green())
+            embed.add_field(name="Récompense", value=f"+{question['points']}€", inline=False)
+            await ctx.send(embed=embed)
+        else:
+            embed = discord.Embed(title="❌ MAUVAISE RÉPONSE", color=discord.Color.red())
+            embed.add_field(name="La réponse était", value=question["a"][0], inline=False)
+            await ctx.send(embed=embed)
+            
+    except asyncio.TimeoutError:
+        await ctx.send(f"⏰ Temps écoulé! La réponse était: **{question['a'][0]}**")
+
+# ============= STATISTIQUES =============
+@bot.command()
+async def serverstats(ctx):
+    guild = ctx.guild
+    
+    total_members = guild.member_count
+    humans = len([m for m in guild.members if not m.bot])
+    bots = len([m for m in guild.members if m.bot])
+    
+    online = len([m for m in guild.members if m.status == discord.Status.online])
+    text_channels = len(guild.text_channels)
+    voice_channels = len(guild.voice_channels)
+    roles = len(guild.roles)
+    
+    embed = discord.Embed(title=f"📊 Stats de {guild.name}", color=discord.Color.blue())
+    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    
+    embed.add_field(name="👥 Membres", value=f"**Total:** {total_members}\n**Humains:** {humans}\n**Bots:** {bots}", inline=True)
+    embed.add_field(name="🟢 En ligne", value=f"{online} membres", inline=True)
+    embed.add_field(name="📅 Créé le", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
+    embed.add_field(name="💬 Salons Textuels", value=text_channels, inline=True)
+    embed.add_field(name="🎤 Salons Vocaux", value=voice_channels, inline=True)
+    embed.add_field(name="🎭 Rôles", value=roles, inline=True)
+    embed.add_field(name="👑 Propriétaire", value=guild.owner.mention, inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def userstats(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    key = f"{ctx.guild.id}_{member.id}"
+    stats = stats_data[key]
+    
+    embed = discord.Embed(title=f"📊 Stats de {member.name}", color=member.color)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    
+    voice_hours = stats["voice_time"] / 3600
+    embed.add_field(name="💬 Messages Envoyés", value=f"{stats['messages']}", inline=True)
+    embed.add_field(name="🎤 Temps Vocal", value=f"{voice_hours:.1f}h", inline=True)
+    embed.add_field(name="📅 Rejoint le", value=member.joined_at.strftime("%d/%m/%Y"), inline=True)
+    
+    user_data = economy_data[key]
+    embed.add_field(name="💰 Argent", value=f"{user_data['money']}€", inline=True)
+    embed.add_field(name="🏆 Niveau", value=f"{user_data['level']}", inline=True)
+    embed.add_field(name="⭐ Réputation", value=f"{user_data['rep']}", inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def rank(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    key = f"{ctx.guild.id}_{member.id}"
+    user_data = economy_data[key]
+    
+    # Créer une carte de rang simple
+    embed = discord.Embed(title=f"📊 Rang de {member.name}", color=member.color)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    
+    xp_needed = user_data['level'] * 100
+    progress = (user_data['xp'] / xp_needed) * 100
+    bar_length = 20
+    filled = int((progress / 100) * bar_length)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    
+    embed.add_field(name="🏆 Niveau", value=user_data['level'], inline=True)
+    embed.add_field(name="✨ XP", value=f"{user_data['xp']}/{xp_needed}", inline=True)
+    embed.add_field(name="💰 Argent", value=f"{user_data['money']}€", inline=True)
+    embed.add_field(name="Progression", value=f"{bar} {progress:.1f}%", inline=False)
+    
+    await ctx.send(embed=embed)
+
+# ============= GIVEAWAY =============
+@bot.command()
+@commands.has_permissions(manage_guild=True)
+async def giveaway(ctx, duration: str, *, prize: str):
+    # Parse duration (ex: 1h, 30m, 1d)
+    time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    time_value = int(duration[:-1])
+    time_unit = duration[-1].lower()
+    
+    if time_unit not in time_units:
+        return await ctx.send("❌ Format invalide! Utilisez: s, m, h, d (ex: 1h, 30m)")
+    
+    seconds = time_value * time_units[time_unit]
+    end_time = datetime.now() + timedelta(seconds=seconds)
+    
+    embed = discord.Embed(title="🎉 GIVEAWAY!", color=discord.Color.purple())
+    embed.add_field(name="Prix", value=prize, inline=False)
+    embed.add_field(name="Durée", value=duration, inline=True)
+    embed.add_field(name="Se termine", value=end_time.strftime("%d/%m/%Y %H:%M"), inline=True)
+    embed.set_footer(text="Réagissez avec 🎉 pour participer!")
+    
+    msg = await ctx.send(embed=embed)
+    await msg.add_reaction("🎉")
+    
+    giveaways_data.append({
+        "message_id": msg.id,
+        "channel_id": ctx.channel.id,
+        "prize": prize,
+        "end_time": end_time
+    })
+
+# ============= POLL =============
+@bot.command()
+async def poll(ctx, *, content: str):
+    if "|" not in content:
+        return await ctx.send("❌ Format: !poll Question | Option1 | Option2 ...")
+    
+    parts = [p.strip() for p in content.split("|")]
+    question = parts[0]
+    options = parts[1:]
+    
+    if len(options) < 2 or len(options) > 10:
+        return await ctx.send("❌ Il faut entre 2 et 10 options!")
+    
+    embed = discord.Embed(title="📊 Sondage", description=question, color=discord.Color.blue())
+    
+    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for i, option in enumerate(options):
+        embed.add_field(name=f"{emojis[i]} Option {i+1}", value=option, inline=False)
+    
+    embed.set_footer(text=f"Sondage créé par {ctx.author}")
+    
+    poll_msg = await ctx.send(embed=embed)
+    
+    for i in range(len(options)):
+        await poll_msg.add_reaction(emojis[i])
+
+# ============= REMINDERS =============
+@bot.command()
+async def remind(ctx, duration: str, *, message: str):
+    time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    time_value = int(duration[:-1])
+    time_unit = duration[-1].lower()
+    
+    if time_unit not in time_units:
+        return await ctx.send("❌ Format invalide! Utilisez: s, m, h, d (ex: 1h, 30m)")
+    
+    seconds = time_value * time_units[time_unit]
+    
+    await ctx.send(f"⏰ Je vous rappellerai dans {duration}!")
+    await asyncio.sleep(seconds)
+    
+    embed = discord.Embed(title="⏰ RAPPEL", description=message, color=discord.Color.orange())
+    await ctx.send(f"{ctx.author.mention}", embed=embed)
+
+# ============= EMBED GENERATOR =============
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def embed(ctx):
+    await ctx.send("**Générateur d'Embed**\nEnvoyez le titre de l'embed:")
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+    
+    try:
+        title_msg = await bot.wait_for('message', check=check, timeout=60)
+        title = title_msg.content
+        
+        await ctx.send("Envoyez la description de l'embed:")
+        desc_msg = await bot.wait_for('message', check=check, timeout=60)
+        description = desc_msg.content
+        
+        await ctx.send("Envoyez la couleur (hex) ou 'skip':")
+        color_msg = await bot.wait_for('message', check=check, timeout=60)
+        
+        if color_msg.content.lower() == "skip":
+            color = discord.Color.blue()
+        else:
+            color = discord.Color(int(color_msg.content.replace("#", ""), 16))
+        
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.set_footer(text=f"Créé par {ctx.author}")
+        
+        await ctx.send("✅ Aperçu de l'embed:", embed=embed)
+        await ctx.send("Réagissez avec ✅ pour envoyer ou ❌ pour annuler")
+        
+        preview = await ctx.channel.fetch_message((await ctx.channel.history(limit=1).flatten())[0].id)
+        await preview.add_reaction("✅")
+        await preview.add_reaction("❌")
+        
+        def reaction_check(reaction, user):
+            return user == ctx.author and str(reaction.emoji) in ["✅", "❌"]
+        
+        reaction, user = await bot.wait_for('reaction_add', check=reaction_check, timeout=60)
+        
+        if str(reaction.emoji) == "✅":
+            await ctx.send(embed=embed)
+        else:
+            await ctx.send("❌ Annulé!")
+            
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ Temps écoulé!")
+
+# ============= ANNOUNCE =============
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def announce(ctx, channel: discord.TextChannel, *, message: str):
+    embed = discord.Embed(description=message, color=discord.Color.blue())
+    embed.set_author(name=f"Annonce de {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    embed.timestamp = datetime.now()
+    
+    await channel.send(embed=embed)
+    await ctx.send(f"✅ Annonce envoyée dans {channel.mention}")
+
+# ============= REACTION =============
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def reaction(ctx, message_id: int, *emojis):
+    try:
+        msg = await ctx.channel.fetch_message(message_id)
+        for emoji in emojis:
+            await msg.add_reaction(emoji)
+        await ctx.send(f"✅ Réactions ajoutées!")
+    except:
+        await ctx.send("❌ Message introuvable!")
+
+# ============= AVATAR & BANNER =============
+@bot.command()
+async def avatar(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    
+    embed = discord.Embed(title=f"Avatar de {member.name}", color=member.color)
+    embed.set_image(url=member.display_avatar.url)
+    embed.add_field(name="Télécharger", value=f"[Clique ici]({member.display_avatar.url})")
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def banner(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    
+    user = await bot.fetch_user(member.id)
+    
+    if user.banner:
+        embed = discord.Embed(title=f"Bannière de {member.name}", color=member.color)
+        embed.set_image(url=user.banner.url)
+        embed.add_field(name="Télécharger", value=f"[Clique ici]({user.banner.url})")
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send(f"❌ {member.mention} n'a pas de bannière!")
+
+# ============= WEATHER =============
+@bot.command()
+async def weather(ctx, *, city: str):
+    await ctx.send("⚠️ Fonctionnalité Weather nécessite une API (OpenWeatherMap). Configurez votre clé API!")
+
+# ============= TRANSLATE =============
+@bot.command()
+async def translate(ctx, target_lang: str, *, text: str):
+    await ctx.send("⚠️ Fonctionnalité Translate nécessite une API (Google Translate). Configurez votre clé API!")
+
+# ============= TIMER =============
+@bot.command()
+async def timer(ctx, duration: str, *, reason: str = "Timer"):
+    time_units = {"s": 1, "m": 60, "h": 3600}
+    time_value = int(duration[:-1])
+    time_unit = duration[-1].lower()
+    
+    if time_unit not in time_units:
+        return await ctx.send("❌ Format invalide! Utilisez: s, m, h (ex: 1h, 30m)")
+    
+    seconds = time_value * time_units[time_unit]
+    
+    embed = discord.Embed(title="⏱️ Timer démarré!", color=discord.Color.blue())
+    embed.add_field(name="Durée", value=duration, inline=True)
+    embed.add_field(name="Raison", value=reason, inline=True)
+    
+    await ctx.send(embed=embed)
+    await asyncio.sleep(seconds)
+    
+    await ctx.send(f"⏰ {ctx.author.mention} Timer terminé: **{reason}**")
+
+# ============= COINFLIP =============
+@bot.command()
+async def coinflip(ctx):
+    result = random.choice(["Pile", "Face"])
+    emoji = "🪙" if result == "Pile" else "💿"
+    
+    embed = discord.Embed(title="🪙 Pile ou Face", color=discord.Color.gold())
+    embed.add_field(name="Résultat", value=f"{emoji} **{result}**")
+    
+    await ctx.send(embed=embed)
+
+# ============= DICE =============
+@bot.command()
+async def dice(ctx, bet: int = 0):
+    result = random.randint(1, 6)
+    
+    embed = discord.Embed(title="🎲 Lancer de Dé", color=discord.Color.blue())
+    embed.add_field(name="Résultat", value=f"**{result}**")
+    
+    if bet > 0:
+        key = f"{ctx.guild.id}_{ctx.author.id}"
+        user_data = economy_data[key]
+        
+        if bet > user_data["money"]:
+            return await ctx.send("❌ Vous n'avez pas assez d'argent!")
+        
+        if result >= 4:
+            winnings = bet * 2
+            user_data["money"] += winnings
+            embed.add_field(name="✅ Gagné!", value=f"+{winnings}€")
+            embed.color = discord.Color.green()
+        else:
+            user_data["money"] -= bet
+            embed.add_field(name="❌ Perdu!", value=f"-{bet}€")
+            embed.color = discord.Color.red()
+    
+    await ctx.send(embed=embed)
+
+# ============= SETRANKROLE =============
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setrankrole(ctx, level: int, role: discord.Role):
+    server_config[ctx.guild.id]["level_roles"][level] = role.id
+    await ctx.send(f"✅ Rôle {role.mention} sera donné au niveau {level}")
+
+# ============= REACTIONROLE SYSTEM =============
+reaction_roles = defaultdict(dict)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def reactionrole(ctx):
+    await ctx.send("**Configuration Reaction Roles**\n1. Envoyez l'ID du message\n2. Ensuite: emoji role (ex: 🎮 @Gamer)")
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+    
+    try:
+        msg_id_msg = await bot.wait_for('message', check=check, timeout=60)
+        msg_id = int(msg_id_msg.content)
+        
+        try:
+            message = await ctx.channel.fetch_message(msg_id)
+        except:
+            return await ctx.send("❌ Message introuvable!")
+        
+        await ctx.send("Envoyez les reaction roles (emoji @role), ou 'done' pour terminer:")
+        
+        while True:
+            response = await bot.wait_for('message', check=check, timeout=120)
+            
+            if response.content.lower() == "done":
+                break
+            
+            parts = response.content.split()
+            if len(parts) < 2:
+                await ctx.send("❌ Format: emoji @role")
+                continue
+            
+            emoji = parts[0]
+            role = response.role_mentions[0] if response.role_mentions else None
+            
+            if not role:
+                await ctx.send("❌ Mentionnez un rôle!")
+                continue
+            
+            reaction_roles[msg_id][emoji] = role.id
+            await message.add_reaction(emoji)
+            await ctx.send(f"✅ {emoji} → {role.mention} ajouté!")
+        
+        await ctx.send("✅ Configuration terminée!")
+        
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ Temps écoulé!")
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.user_id == bot.user.id:
+        return
+    
+    if payload.message_id in reaction_roles:
+        emoji = str(payload.emoji)
+        if emoji in reaction_roles[payload.message_id]:
+            guild = bot.get_guild(payload.guild_id)
+            role = guild.get_role(reaction_roles[payload.message_id][emoji])
+            member = guild.get_member(payload.user_id)
+            
+            if role and member:
+                await member.add_roles(role)
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if payload.message_id in reaction_roles:
+        emoji = str(payload.emoji)
+        if emoji in reaction_roles[payload.message_id]:
+            guild = bot.get_guild(payload.guild_id)
+            role = guild.get_role(reaction_roles[payload.message_id][emoji])
+            member = guild.get_member(payload.user_id)
+            
+            if role and member:
+                await member.remove_roles(role)
+
+# ============= LEADERBOARD =============
+@bot.command()
+async def leaderboard(ctx, mode: str = "money"):
+    if mode not in ["money", "level", "xp"]:
+        return await ctx.send("❌ Modes disponibles: money, level, xp")
+    
+    guild_members = [f"{ctx.guild.id}_{m.id}" for m in ctx.guild.members if not m.bot]
+    
+    sorted_data = sorted(
+        [(key, economy_data[key]) for key in guild_members if key in economy_data],
+        key=lambda x: x[1][mode],
+        reverse=True
+    )[:10]
+    
+    embed = discord.Embed(title=f"🏆 Classement - {mode.upper()}", color=discord.Color.gold())
+    
+    medals = ["🥇", "🥈", "🥉"]
+    
+    for i, (key, data) in enumerate(sorted_data):
         user_id = int(key.split("_")[1])
-        user = ctx.guild.get_member(user_id)
-        if user:
-            value = data[type]
-            emoji = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"**{i}.**"
+        member = ctx.guild.get_member(user_id)
+        
+        if member:
+            medal = medals[i] if i < 3 else f"{i+1}."
+            value = f"{data[mode]}{'€' if mode == 'money' else ''}"
             embed.add_field(
-                name=f"{emoji} {user.name}",
-                value=f"{value}{'€' if type == 'money' else ' XP' if type == 'xp' else ''}",
+                name=f"{medal} {member.name}",
+                value=value,
                 inline=False
             )
     
     await ctx.send(embed=embed)
 
-@bot.command()
-async def work(ctx):
-    key = f"{ctx.guild.id}_{ctx.author.id}"
-    user_data = economy_data[key]
-    
-    last_work = user_data.get("work_claimed")
-    if last_work:
-        next_work = datetime.fromisoformat(last_work) + timedelta(hours=1)
-        if datetime.now() < next_work:
-            remaining = next_work - datetime.now()
-            minutes = int(remaining.total_seconds() // 60)
-            return await ctx.send(f"⏰ Vous devez attendre {minutes} minutes avant de retravailler!")
-    
-    jobs = ["développeur", "designer", "manager", "consultant", "vendeur"]
-    job = random.choice(jobs)
-    earnings = random.randint(200, 500)
-    
-    user_data["money"] += earnings
-    user_data["work_claimed"] = datetime.now().isoformat()
-    
-    await ctx.send(f"💼 Vous avez travaillé comme **{job}** et gagné **{earnings}€**!")
-
-@bot.command()
-async def beg(ctx):
-    if random.random() < 0.5:
-        earnings = random.randint(10, 50)
-        key = f"{ctx.guild.id}_{ctx.author.id}"
-        economy_data[key]["money"] += earnings
-        await ctx.send(f"🙏 Quelqu'un vous a donné {earnings}€!")
-    else:
-        await ctx.send("🙅 Personne ne vous a donné d'argent...")
-
-# ============= FUN COMMANDS =============
-@bot.command()
-async def eightball(ctx, *, question):
-    responses = [
-        "Oui, absolument!", "C'est certain.", "Sans aucun doute.",
-        "Probablement.", "Les signes pointent vers oui.",
-        "Réessayez plus tard.", "Mieux vaut ne pas le dire maintenant.",
-        "Je ne peux pas prédire maintenant.", "Concentrez-vous et redemandez.",
-        "N'y comptez pas.", "Ma réponse est non.", "Mes sources disent non."
-    ]
-    await ctx.send(f"🎱 {random.choice(responses)}")
-
-@bot.command(aliases=["blague"])
-async def joke(ctx):
-    jokes = [
-        "Pourquoi les plongeurs plongent-ils toujours en arrière? Parce que sinon ils tombent dans le bateau!",
-        "Qu'est-ce qu'un crocodile qui surveille la pharmacie? Un Lacoste-Garde!",
-        "Comment appelle-t-on un chat tombé dans un pot de peinture? Un chat-peauté!",
-        "Que dit un escargot quand il croise une limace? Oh, un naturiste!",
-        "Qu'est-ce qu'un canif? Un petit fien!"
-    ]
-    await ctx.send(f"😂 {random.choice(jokes)}")
-
-@bot.command(aliases=["citation"])
-async def quote(ctx):
-    quotes = [
-        "Le succès c'est d'aller d'échec en échec sans perdre son enthousiasme. - Winston Churchill",
-        "La vie c'est comme une bicyclette, il faut avancer pour ne pas perdre l'équilibre. - Albert Einstein",
-        "L'avenir appartient à ceux qui croient en la beauté de leurs rêves. - Eleanor Roosevelt",
-        "Soyez le changement que vous voulez voir dans le monde. - Gandhi",
-        "Le seul moyen de faire du bon travail est d'aimer ce que vous faites. - Steve Jobs"
-    ]
-    await ctx.send(f"💭 {random.choice(quotes)}")
-
-@bot.command()
-async def ascii(ctx, *, text: str):
-    ascii_art = {
-        'a': '  ▄▀█  ', 'b': ' █▄▄  ', 'c': ' █▀▀  ', 'd': ' █▀▄  ', 'e': ' █▀▀  ',
-        'f': ' █▀▀  ', 'g': ' █▀▀▀ ', 'h': ' █░█  ', 'i': ' █  ', 'j': ' █▀▀█ ',
-        'k': ' █▄▀  ', 'l': ' █░░  ', 'm': ' █▀▄▀█ ', 'n': ' █▄░█ ', 'o': ' █▀█  ',
-        'p': ' █▀█  ', 'q': ' █▀█▄ ', 'r': ' █▀█  ', 's': ' █▀▀  ', 't': ' ▀█▀  ',
-        'u': ' █░█  ', 'v': ' █░█  ', 'w': ' █░█░█ ', 'x': ' ▀▄▀  ', 'y': ' █▄█  ',
-        'z': ' ▀█  ', ' ': '    '
-    }
-    
-    result = ""
-    for char in text.lower()[:10]:
-        if char in ascii_art:
-            result += ascii_art[char]
-    
-    await ctx.send(f"
-\n{result}\n
-")
-
-@bot.command()
-async def coinflip(ctx):
-    result = random.choice(["Pile", "Face"])
-    await ctx.send(f"🪙 Résultat: **{result}**!")
-
-@bot.command()
-async def rate(ctx, *, thing: str):
-    rating = random.randint(0, 100)
-    await ctx.send(f"Je donne à **{thing}** un score de **{rating}/100**! {'🔥' if rating > 80 else '👍' if rating > 50 else '😐'}")
-
-@bot.command()
-async def ship(ctx, member1: discord.Member, member2: discord.Member):
-    percentage = random.randint(0, 100)
-    hearts = "❤️" * (percentage // 20)
-    ship_name = member1.name[:len(member1.name)//2] + member2.name[len(member2.name)//2:]
-    
-    embed = discord.Embed(title="💕 Ship-o-mètre", color=discord.Color.pink())
-    embed.add_field(name="Couple", value=f"{member1.mention} + {member2.mention}", inline=False)
-    embed.add_field(name="Nom du couple", value=ship_name, inline=False)
-    embed.add_field(name="Affinité", value=f"{hearts} {percentage}%", inline=False)
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def choose(ctx, *, choices: str):
-    options = [opt.strip() for opt in choices.split(',')]
-    if len(options) < 2:
-        return await ctx.send("❌ Donnez au moins 2 options séparées par des virgules!")
-    
-    choice = random.choice(options)
-    await ctx.send(f"🎯 Je choisis: **{choice}**")
-
-# ============= UTILITY COMMANDS =============
-@bot.command()
-async def userinfo(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    
-    embed = discord.Embed(title=f"Informations sur {member}", color=member.color)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="ID", value=member.id, inline=False)
-    embed.add_field(name="Nom", value=str(member), inline=False)
-    embed.add_field(name="Surnom", value=member.display_name, inline=False)
-    embed.add_field(name="Compte créé le", value=member.created_at.strftime("%d/%m/%Y %H:%M"), inline=False)
-    embed.add_field(name="A rejoint le", value=member.joined_at.strftime("%d/%m/%Y %H:%M"), inline=False)
-    embed.add_field(name="Rôles", value=f"{len(member.roles)-1} rôles", inline=False)
-    
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def serverinfo(ctx):
-    guild = ctx.guild
-    
-    embed = discord.Embed(title=f"Informations sur {guild.name}", color=discord.Color.blue())
-    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    embed.add_field(name="ID", value=guild.id, inline=False)
-    embed.add_field(name="Propriétaire", value=guild.owner.mention, inline=False)
-    embed.add_field(name="Créé le", value=guild.created_at.strftime("%d/%m/%Y"), inline=False)
-    embed.add_field(name="Membres", value=guild.member_count, inline=True)
-    embed.add_field(name="Rôles", value=len(guild.roles), inline=True)
-    embed.add_field(name="Salons", value=len(guild.channels), inline=True)
-    
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def timer(ctx, duration: str, *, reason="Minuteur"):
-    time_units = {"s": 1, "m": 60, "h": 3600}
-    unit = duration[-1]
-    if unit not in time_units:
-        return await ctx.send("❌ Format: 30s, 5m, 1h")
-    
-    amount = int(duration[:-1])
-    seconds = amount * time_units[unit]
-    
-    await ctx.send(f"⏰ Minuteur de {duration} démarré pour: **{reason}**")
-    await asyncio.sleep(seconds)
-    await ctx.send(f"{ctx.author.mention} ⏰ Votre minuteur est terminé! **{reason}**")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def automod(ctx, action: str, *, word: str = None):
-    config = server_config[ctx.guild.id]
-    
-    if action.lower() == "add":
-        if not word:
-            return await ctx.send("❌ Spécifiez un mot à ajouter!")
-        config["automod_words"].append(word.lower())
-        await ctx.send(f"✅ Mot ajouté à l'automod: **{word}**")
-    
-    elif action.lower() == "list":
-        if not config["automod_words"]:
-            return await ctx.send("📝 Aucun mot interdit configuré.")
-        
-        embed = discord.Embed(title="🚫 Mots Interdits", color=discord.Color.red())
-        embed.description = "\n".join([f"• {w}" for w in config["automod_words"]])
-        await ctx.send(embed=embed)
-    
-    elif action.lower() == "remove":
-        if word and word.lower() in config["automod_words"]:
-            config["automod_words"].remove(word.lower())
-            await ctx.send(f"✅ Mot retiré: **{word}**")
-        else:
-            await ctx.send("❌ Ce mot n'est pas dans la liste!")
-
-# ============= WELCOME/LEAVE MESSAGES =============
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def bvntext(ctx, *, message: str = None):
-    if not message:
-        config = server_config[ctx.guild.id]
-        return await ctx.send(f"Message actuel: {config['welcome_msg']}\n\nVariables: {{user}} {{server}}")
-    
-    server_config[ctx.guild.id]["welcome_msg"] = message
-    server_config[ctx.guild.id]["welcome_embed"] = None
-    await ctx.send(f"✅ Message de bienvenue défini!\nAperçu: {message.replace('{user}', ctx.author.mention).replace('{server}', ctx.guild.name)}")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def bvnembed(ctx, *, content: str = None):
-    if not content or '|' not in content:
-        return await ctx.send("❌ Format: !bvnembed Titre | Description\n\nVariables: {user} {server}")
-    
-    parts = content.split('|', 1)
-    title = parts[0].strip()
-    description = parts[1].strip()
-    
-    server_config[ctx.guild.id]["welcome_embed"] = {"title": title, "description": description}
-    server_config[ctx.guild.id]["welcome_msg"] = None
-    
-    preview = discord.Embed(
-        title=title.replace("{user}", ctx.author.name),
-        description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name),
-        color=discord.Color.green()
-    )
-    await ctx.send("✅ Embed de bienvenue défini!\nAperçu:", embed=preview)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def leavetext(ctx, *, message: str = None):
-    if not message:
-        config = server_config[ctx.guild.id]
-        return await ctx.send(f"Message actuel: {config['leave_msg']}\n\nVariables: {{user}} {{server}}")
-    
-    server_config[ctx.guild.id]["leave_msg"] = message
-    server_config[ctx.guild.id]["leave_embed"] = None
-    await ctx.send(f"✅ Message de départ défini!\nAperçu: {message.replace('{user}', ctx.author.name).replace('{server}', ctx.guild.name)}")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def leaveembed(ctx, *, content: str = None):
-    if not content or '|' not in content:
-        return await ctx.send("❌ Format: !leaveembed Titre | Description\n\nVariables: {user} {server}")
-    
-    parts = content.split('|', 1)
-    title = parts[0].strip()
-    description = parts[1].strip()
-    
-    server_config[ctx.guild.id]["leave_embed"] = {"title": title, "description": description}
-    server_config[ctx.guild.id]["leave_msg"] = None
-    
-    preview = discord.Embed(
-        title=title.replace("{user}", ctx.author.name),
-        description=description.replace("{user}", ctx.author.name).replace("{server}", ctx.guild.name),
-        color=discord.Color.red()
-    )
-    await ctx.send("✅ Embed de départ défini!\nAperçu:", embed=preview)
-
-# ============= ADMIN ECONOMY COMMANDS =============
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def shopadd(ctx, role: discord.Role, price: int):
-    config = server_config[ctx.guild.id]
-    
-    if any(item["role_id"] == role.id for item in config["shop"]):
-        return await ctx.send("❌ Ce rôle est déjà dans la boutique!")
-    
-    config["shop"].append({"role_id": role.id, "price": price})
-    await ctx.send(f"✅ {role.mention} ajouté à la boutique pour {price}€!")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def shopremove(ctx, role: discord.Role):
-    config = server_config[ctx.guild.id]
-    config["shop"] = [item for item in config["shop"] if item["role_id"] != role.id]
-    await ctx.send(f"✅ {role.mention} retiré de la boutique!")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def givemoney(ctx, member: discord.Member, amount: int):
-    key = f"{ctx.guild.id}_{member.id}"
-    economy_data[key]["money"] += amount
-    await ctx.send(f"✅ {amount}€ ajouté à {member.mention}!")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def removemoney(ctx, member: discord.Member, amount: int):
-    key = f"{ctx.guild.id}_{member.id}"
-    economy_data[key]["money"] = max(0, economy_data[key]["money"] - amount)
-    await ctx.send(f"✅ {amount}€ retiré à {member.mention}!")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def setlevel(ctx, member: discord.Member, level: int):
-    key = f"{ctx.guild.id}_{member.id}"
-    economy_data[key]["level"] = level
-    economy_data[key]["xp"] = 0
-    await ctx.send(f"✅ Niveau de {member.mention} défini à {level}!")
-
-# ============= ERROR HANDLING =============
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Vous n'avez pas la permission d'utiliser cette commande!")
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Argument manquant! Utilisez !help pour plus d'infos.")
-    elif isinstance(error, commands.CommandNotFound):
-        pass
-    else:
-        print(f"Erreur: {error}")
-
-# ============= LANCEMENT DU BOT =============
+# ============= FINAL TOKEN START =============
 if __name__ == "__main__":
     keep_alive()
     TOKEN = os.getenv('DISCORD_TOKEN')
     
     if not TOKEN:
         print("❌ ERREUR: Token Discord manquant!")
-        print("Ajoutez votre token dans les variables d'environnement de Render:")
-        print("DISCORD_TOKEN = votre_token_ici")
+        print("Ajoutez DISCORD_TOKEN dans vos variables d'environnement")
     else:
         try:
             bot.run(TOKEN)
         except Exception as e:
-            print(f"❌ Erreur de connexion: {e}")
+            print(f"❌ Erreur de démarrage: {e}")
