@@ -1,3 +1,0 @@
-disnake==2.9.2
-pyfiglet
-python-dotenv==1.0.0
