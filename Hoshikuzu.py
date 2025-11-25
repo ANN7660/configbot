@@ -1,4 +1,4 @@
-import discord
+import disnake as discord
 from discord.ext import commands, tasks
 from discord.ui import Button, View, Select
 import asyncio
