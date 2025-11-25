@@ -1,6 +1,6 @@
 import disnake as discord
-from discord.ext import commands, tasks
-from discord.ui import Button, View, Select
+from disnake.ext import commands, tasks
+from disnake.ui import Button, View, Select
 import asyncio
 import aiohttp
 import json
