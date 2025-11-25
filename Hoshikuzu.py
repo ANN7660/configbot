@@ -1,781 +1,864 @@
+import discord
+from discord.ext import commands, tasks
+from discord.ui import Button, View, Select
+import asyncio
+import aiohttp
+import json
 import os
-import disnake as discord
-from disnake.ext import commands, tasks
-from disnake import ui
 from datetime import datetime, timedelta
 import random
-import re
-import asyncio
-import time
-from pyfiglet import Figlet
-import inspect
+from collections import defaultdict
+from flask import Flask
+from threading import Thread
 
-
-# --- VARIABLES D'ÉTAT (Nécessaires pour ces commandes) ---
-# Si ces variables n'ont pas été remplies depuis le début du script,
-# assurez-vous de les copier/coller depuis la partie originale,
-# en particulier les IDs de configuration.
-
-# Configuration des seuils/réponses
-BALL_RESPONSES = ["Absolument.", "Sans aucun doute.", "Oui, définitivement.", "Peu probable.", "N'y compte pas.", "Demande plus tard."]
-JOKES = ["Pourquoi les poissons vivent-ils dans l'eau salée ? Parce que le poivre, ça les fait éternuer !", "Que dit un informaticien quand il s'ennuie ? 'Je me fais ch** à bits!'"]
-QUOTES = ["La seule façon de faire du bon travail est d'aimer ce que vous faites. - Steve Jobs", "Vis comme si tu devais mourir demain. Apprends comme si tu devais vivre toujours. - Gandhi"]
-
-LOG_CHANNEL_ID = 123456789012345670 
-WELCOME_CHANNEL_ID = 123456789012345671
-DEFAULT_ROLE_ID = 123456789012345672
-TICKET_CATEGORY_ID = 123456789012345673 
-VOICE_CHANNEL_CREATOR_ID = 123456789012345675 
-PIN_REACTION_EMOJI = '📌'
-INVITE_LINK = "VOTRE LIEN D'INVITATION ICI"
-
-# Variables de Cooldowns et XP (pour les fonctions d'info/stats)
-XP_PER_MESSAGE = 15
-XP_COOLDOWN = 60
-DAILY_COOLDOWN = 86400
-REP_COOLDOWN = 86400
-LEVEL_ROLES_MAP = {5: 123456789012345680}
-SHOP_ROLES = {123456789012345683: 5000}
-
-# Variables d'état
-USER_XP = {}
-USER_LAST_MESSAGE = {}
-USER_LAST_DAILY = {}
-USER_LAST_REP = {}
-USER_WARNINGS = {}
-TICKET_CHANNELS = {}
-TEMP_VOICE_CHANNELS = {}
-USER_NAME_HISTORY = {} 
-
-SERVER_CONFIG = {
-    'welcome_channel_id': WELCOME_CHANNEL_ID,
-    'log_channel_id': LOG_CHANNEL_ID,
-    'default_role_id': DEFAULT_ROLE_ID,
-    'ticket_category_id': TICKET_CATEGORY_ID,
-    'voice_channel_creator_id': VOICE_CHANNEL_CREATOR_ID,
-    'welcome_type': 'text',
-    'welcome_message': "👋 Bienvenue {user.mention} ! Nous sommes {member_count} sur {guild.name}.", 
-    'leave_type': 'text',
-    'leave_message': "🚪 Au revoir {user.name}. Il nous reste {member_count} membres.",
-}
-START_TIME = time.time()
-TOKEN = os.getenv('DISCORD_TOKEN')
-PREFIX = '!'
+# ============= CONFIGURATION =============
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# --- FONCTIONS UTILITAIRES (Incluses dans la partie 1) ---
-def get_level_threshold(level): return 5 * (level ** 2) + 50 * level + 100
-def get_user_data(user_id):
-    if user_id not in USER_XP:
-        USER_XP[user_id] = {'xp': 0, 'level': 1, 'currency': 100, 'rep': 0}
-    return USER_XP[user_id]
-async def get_channel_safe(guild, channel_id):
-    if channel_id and channel_id in [c.id for c in guild.channels]: return guild.get_channel(channel_id)
-    return None
-async def send_log_embed(guild, title, color, fields):
-    log_channel = await get_channel_safe(guild, SERVER_CONFIG.get('log_channel_id', LOG_CHANNEL_ID))
-    if log_channel:
-        embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
-        for name, value in fields:
-            embed.add_field(name=name, value=value, inline=False)
-        await log_channel.send(embed=embed)
-        
-def format_message(template, member, guild, is_join):
-    """Remplace les placeholders dans un template de message ou embed."""
-    message = template.replace("{user.mention}", member.mention)
-    message = message.replace("{user.name}", member.display_name)
-    message = message.replace("{guild.name}", guild.name)
-    member_count = guild.member_count 
-    message = message.replace("{member_count}", str(member_count)) 
-    return message
+# ============= DONNÉES =============
+economy_data = defaultdict(lambda: {"money": 0, "xp": 0, "level": 1, "rep": 0, "daily_claimed": None, "work_claimed": None})
+warnings_data = defaultdict(list)
+server_config = defaultdict(lambda: {
+    "welcome_channel": None,
+    "leave_channel": None,
+    "welcome_msg": "Bienvenue {user} sur {server}!",
+    "leave_msg": "{user} a quitté {server}",
+    "welcome_embed": None,
+    "leave_embed": None,
+    "automod_words": [],
+    "shop": []
+})
 
-def format_timedelta(td: timedelta):
-    """Formate un timedelta en jours, heures, minutes et secondes."""
-    seconds = int(td.total_seconds())
-    periods = [
-        ('jour', 60*60*24),
-        ('heure', 60*60),
-        ('minute', 60),
-        ('seconde', 1)
-    ]
-    
-    parts = []
-    for name, secs in periods:
-        if seconds >= secs:
-            value, seconds = divmod(seconds, secs)
-            parts.append(f"{value} {name}{'s' if value > 1 else ''}")
-    return ", ".join(parts) or "Moins d'une seconde"
+# ============= KEEP ALIVE (RENDER) =============
+app = Flask('')
 
+@app.route('/')
+def home():
+    return "Bot is running!"
 
-# --- COMMANDES D'INFO & UTILITAIRES (Suite) ---
+def run():
+    app.run(host='0.0.0.0', port=8080)
 
-@bot.command(name='userinfo')
-async def user_info(ctx, member: discord.Member = None):
-    """Affiche un Embed complet sur l'utilisateur : rôles, niveau, monnaie, date d'arrivée, âge du compte, warnings."""
-    member = member or ctx.author
-    user_id = str(member.id)
-    data = get_user_data(user_id)
-    warnings = USER_WARNINGS.get(user_id, [])
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
-    # Ancienneté
-    account_age = datetime.now(member.created_at.tzinfo) - member.created_at
-    join_age = datetime.now(member.joined_at.tzinfo) - member.joined_at
+# ============= EVENTS =============
+@bot.event
+async def on_ready():
+    print(f'✅ {bot.user} est connecté!')
+    auto_reboot.start()
+    await bot.change_presence(activity=discord.Game(name="!help"))
 
-    embed = discord.Embed(
-        title=f"👤 Informations sur {member.display_name}",
-        color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
-        timestamp=datetime.now()
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
+@tasks.loop(hours=23)
+async def auto_reboot():
+    print("🔄 Auto-reboot check...")
 
-    # Statistiques personnalisées
-    embed.add_field(name="🚀 Niveau & XP", value=f"**Niveau:** {data['level']}\n**XP:** {data['xp']}/{get_level_threshold(data['level'])}\n**Monnaie:** {data['currency']} 💰\n**Réputation:** {data['rep']} ⭐", inline=False)
-    
-    # Dates
-    embed.add_field(name="🕰️ Ancienneté du Compte", value=f"Créé le <t:{int(member.created_at.timestamp())}:D>\nIl y a {format_timedelta(account_age)}", inline=True)
-    embed.add_field(name="🚪 Arrivée sur le Serveur", value=f"Rejoint le <t:{int(member.joined_at.timestamp())}:D>\nIl y a {format_timedelta(join_age)}", inline=True)
-    
-    # Rôles et Warnings
-    roles = [role.mention for role in member.roles if role.name != "@everyone"]
-    embed.add_field(name=f"🛡️ Rôles ({len(roles)})", value=' '.join(roles[:5]) + ('...' if len(roles) > 5 else '') or "Aucun rôle spécial.", inline=False)
-    embed.add_field(name="⚠️ Warnings", value=f"Total: **{len(warnings)}**", inline=True)
-    embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
-
-    await ctx.send(embed=embed)
-
-
-@bot.command(name='serverinfo')
-async def server_info(ctx):
-    """Affiche les statistiques du serveur (nombre de membres, rôles, salons, créateur, date de création)."""
-    guild = ctx.guild
-    
-    embed = discord.Embed(
-        title=f"🏛️ Statistiques du Serveur : {guild.name}",
-        color=discord.Color.gold(),
-        timestamp=datetime.now()
-    )
-    
-    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    
-    # Infos générales
-    embed.add_field(name="Créateur", value=guild.owner.mention if guild.owner else "Inconnu", inline=True)
-    embed.add_field(name="ID du Serveur", value=f"`{guild.id}`", inline=True)
-    embed.add_field(name="Date de Création", value=f"<t:{int(guild.created_at.timestamp())}:D>", inline=True)
-
-    # Membres et Salons
-    members = len([m for m in guild.members if not m.bot])
-    bots = len([m for m in guild.members if m.bot])
-    embed.add_field(name="Total Membres", value=f"**{guild.member_count}** ({members} humains / {bots} bots)", inline=True)
-    embed.add_field(name="Salons (Total)", value=f"{len(guild.channels)}", inline=True)
-    embed.add_field(name="Rôles", value=f"{len(guild.roles)}", inline=True)
-
-    # Niveaux de vérification/boost
-    boost_status = f"{guild.premium_subscription_count} boosts (Niv. {guild.premium_tier})" if guild.premium_subscription_count else "Aucun boost"
-    embed.add_field(name="Boosts", value=boost_status, inline=True)
-
-    await ctx.send(embed=embed)
-
-@bot.command(name='poll')
-@commands.has_permissions(manage_messages=True)
-async def create_poll(ctx, question: str, *options_raw):
-    """Crée un sondage interactif avec des réactions pour voter. Utilisation: !poll <question> | <option1> | <option2>..."""
-    
-    options = question.split('|')
-    if len(options) < 3:
-        return await ctx.send("❌ Format invalide. Utilisez: `!poll <question> | <option1> | <option2>...`", delete_after=15)
-
-    question_text = options[0].strip()
-    poll_options = [opt.strip() for opt in options[1:] if opt.strip()]
-    
-    if len(poll_options) > 10:
-        return await ctx.send("❌ Limite de 10 options pour le sondage.", delete_after=10)
-
-    emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
-    
-    description = ""
-    for i, option in enumerate(poll_options):
-        description += f"{emojis[i]} : **{option}**\n"
-
-    embed = discord.Embed(
-        title=f"🗳️ Sondage : {question_text}",
-        description=description,
-        color=discord.Color.purple(),
-        timestamp=datetime.now()
-    )
-    embed.set_footer(text=f"Sondage lancé par {ctx.author.display_name}")
-
-    poll_message = await ctx.send(embed=embed)
-    await ctx.message.delete()
-
-    for i in range(len(poll_options)):
-        await poll_message.add_reaction(emojis[i])
-
-@bot.command(name='avatar', aliases=['pfp'])
-async def display_avatar(ctx, member: discord.Member = None):
-    """Affiche la photo de profil (avatar) d'un membre en grande taille."""
-    member = member or ctx.author
-    
-    embed = discord.Embed(
-        title=f"🖼️ Avatar de {member.display_name}",
-        color=discord.Color.dark_purple()
-    )
-    embed.set_image(url=member.display_avatar.url)
-    embed.set_footer(text=f"Demandé par {ctx.author.display_name}")
-    
-    await ctx.send(embed=embed)
-
-# La commande !firstmsg a été définie dans la partie précédente mais si elle est demandée à nouveau :
-@bot.command(name='firstmsg')
-async def get_first_message(ctx, channel: discord.TextChannel = None):
-    """Trouve et affiche le tout premier message envoyé dans le salon actuel (utile pour les archives)."""
-    channel = channel or ctx.channel
-    try:
-        async for message in channel.history(limit=1, oldest_first=True):
-            first_message = message
-            break
-        else:
-            return await ctx.send(f"❌ Impossible de trouver le premier message dans {channel.mention}.", delete_after=10)
-
-        embed = discord.Embed(
-            title=f"🗓️ Premier Message dans #{channel.name}",
-            description=f"[Cliquer ici pour voir le message original]({first_message.jump_url})",
-            color=discord.Color.blue(),
-            timestamp=first_message.created_at
-        )
-        embed.add_field(name="Auteur", value=first_message.author.mention, inline=True)
-        embed.add_field(name="Contenu (extrait)", value=first_message.content[:500] if first_message.content else "*Contenu vide ou embed*", inline=False)
-        
-        await ctx.send(embed=embed)
-
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas la permission de lire l'historique de ce salon.")
-    except Exception:
-        await ctx.send("❌ Erreur lors de la récupération du premier message.")
-
-@bot.command(name='timer')
-async def start_timer(ctx, time_str: str, *, reason: str = "Minuteur terminé"):
-    """Démarre un minuteur et vous mentionne lorsque le temps est écoulé (ex: !timer 30m café)."""
-    
-    match = re.match(r"(\d+)([smhd])", time_str.lower())
-    if not match:
-        return await ctx.send("❌ Format de temps invalide. Utilisez par exemple `30m`, `1h`, `5s`.", delete_after=10)
-
-    value = int(match.group(1))
-    unit = match.group(2)
-    
-    if unit == 's': duration = timedelta(seconds=value)
-    elif unit == 'm': duration = timedelta(minutes=value)
-    elif unit == 'h': duration = timedelta(hours=value)
-    elif unit == 'd': duration = timedelta(days=value)
-    else: return await ctx.send("❌ Unité de temps non reconnue.", delete_after=10)
-    
-    if duration.total_seconds() > 86400 * 7: # Limite à 7 jours
-        return await ctx.send("❌ Le minuteur ne peut pas dépasser 7 jours.", delete_after=10)
-
-    formatted_duration = format_timedelta(duration)
-    
-    await ctx.send(f"⏱️ Minuteur démarré pour **{formatted_duration}** ({reason}). Je vous notifierai : {ctx.author.mention}.")
-
-    await asyncio.sleep(duration.total_seconds())
-
-    await ctx.send(f"🔔 **{ctx.author.mention}**, votre minuteur est terminé !\n> **Raison:** {reason}")
-
-
-# [COMMANDES DE BIENVENUE/DÉPART]
-
-@bot.command(name='bvntexte', aliases=['welcometext'])
-@commands.has_permissions(administrator=True)
-async def set_welcome_text(ctx, *, message: str):
-    """Définit le message de bienvenue en format texte."""
-    global SERVER_CONFIG
-    SERVER_CONFIG['welcome_type'] = 'text'
-    SERVER_CONFIG['welcome_message'] = message
-    await ctx.send(f"✅ Message de bienvenue TEXTE défini. Placeholders : `{{user.mention}}`, `{{guild.name}}`, `{{member_count}}`")
-
-@bot.command(name='bvnembed', aliases=['welcomeembed'])
-@commands.has_permissions(administrator=True)
-async def set_welcome_embed(ctx, *, message: str):
-    """Définit le message de bienvenue en format Embed (Titre | Description)."""
-    if '|' not in message: return await ctx.send("❌ Format invalide. Utilisez: `!bvnembed <Titre> | <Description>`")
-    global SERVER_CONFIG
-    SERVER_CONFIG['welcome_type'] = 'embed'
-    SERVER_CONFIG['welcome_message'] = message
-    await ctx.send(f"✅ Message de bienvenue EMBED défini (Titre | Description).")
-
-@bot.command(name='leavetext')
-@commands.has_permissions(administrator=True)
-async def set_leave_text(ctx, *, message: str):
-    """Définit le message de départ en format texte."""
-    global SERVER_CONFIG
-    SERVER_CONFIG['leave_type'] = 'text'
-    SERVER_CONFIG['leave_message'] = message
-    await ctx.send(f"✅ Message de départ TEXTE défini. Placeholders : `{{user.name}}`, `{{guild.name}}`, `{{member_count}}`")
-
-@bot.command(name='leaveembed')
-@commands.has_permissions(administrator=True)
-async def set_leave_embed(ctx, *, message: str):
-    """Définit le message de départ en format Embed (Titre | Description)."""
-    if '|' not in message: return await ctx.send("❌ Format invalide. Utilisez: `!leaveembed <Titre> | <Description>`")
-    global SERVER_CONFIG
-    SERVER_CONFIG['leave_type'] = 'embed'
-    SERVER_CONFIG['leave_message'] = message
-    await ctx.send(f"✅ Message de départ EMBED défini (Titre | Description).")
-
-# Fin de la Partie 1/2
-# [COMMANDES DE MODÉRATION & SÉCURITÉ]
-
-# Liste des mots interdits (globale)
-FORBIDDEN_WORDS = set() 
-
-@bot.group(name='automod')
-@commands.has_permissions(administrator=True)
-async def automod(ctx):
-    """(Admin) Ensemble des commandes pour gérer l'Auto-Modération (mots interdits)."""
-    if ctx.invoked_subcommand is None:
-        await ctx.send("❌ Sous-commande manquante. Utilisez `!automod add <mot>` ou `!automod list`.", delete_after=10)
-
-@automod.command(name='add')
-@commands.has_permissions(administrator=True)
-async def automod_add(ctx, *, word: str):
-    """(Admin) Ajoute un mot à la liste des mots interdits (Auto-Modération)."""
-    word = word.lower().strip()
-    if not word:
-        return await ctx.send("❌ Veuillez spécifier le mot à interdire.")
-        
-    if word in FORBIDDEN_WORDS:
-        return await ctx.send(f"⚠️ Le mot `{word}` est déjà dans la liste des mots interdits.", delete_after=10)
-    
-    FORBIDDEN_WORDS.add(word)
-    await ctx.send(f"✅ Le mot **`{word}`** a été ajouté à la liste des mots interdits.")
-
-@automod.command(name='list')
-async def automod_list(ctx):
-    """(Admin) Affiche la liste des mots interdits configurés."""
-    if not FORBIDDEN_WORDS:
-        return await ctx.send("✅ La liste des mots interdits est vide.", delete_after=10)
-        
-    words_list = ", ".join(sorted(list(FORBIDDEN_WORDS)))
-    
-    embed = discord.Embed(
-        title="🚫 Liste des Mots Interdits",
-        description=f"**Total :** {len(FORBIDDEN_WORDS)} mots\n\n`{words_list}`",
-        color=discord.Color.red()
-    )
-    await ctx.send(embed=embed)
-
-# --- ÉVÉNEMENT POUR L'AUTOMODÉRATION (Vérifie chaque message) ---
-@bot.listen('on_message')
-async def check_forbidden_words(message):
-    if message.author.bot or not message.guild:
+@bot.event
+async def on_member_join(member):
+    config = server_config[member.guild.id]
+    channel_id = config.get("welcome_channel")
+    if not channel_id:
         return
-
-    content = message.content.lower()
     
-    for word in FORBIDDEN_WORDS:
-        if re.search(r'\b' + re.escape(word) + r'\b', content): # Recherche du mot exact
-            try:
-                await message.delete()
-                
-                # Envoi d'un message d'avertissement temporaire
-                warning_msg = await message.channel.send(f"🚫 **{message.author.mention}**, vous avez utilisé un mot interdit. Message supprimé.", delete_after=5)
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+    
+    if config.get("welcome_embed"):
+        embed_data = config["welcome_embed"]
+        embed = discord.Embed(
+            title=embed_data.get("title", "Bienvenue!").replace("{user}", member.name),
+            description=embed_data.get("description", "").replace("{user}", member.mention).replace("{server}", member.guild.name),
+            color=discord.Color.green()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await channel.send(embed=embed)
+    else:
+        msg = config["welcome_msg"].replace("{user}", member.mention).replace("{server}", member.guild.name)
+        await channel.send(msg)
 
-                # Optionnel : Enregistrer un warning ou mute la personne après X violations
-                
-                # Log l'action
-                await send_log_embed(message.guild, 
-                                     "🚫 Auto-Modération : Mot Interdit", 
-                                     discord.Color.red(), 
-                                     [
-                                         ("Utilisateur", message.author.mention),
-                                         ("Mot Interdit", word),
-                                         ("Salon", message.channel.mention)
-                                     ])
-                                     
-            except discord.Forbidden:
-                # Si le bot n'a pas les permissions de suppression
-                pass
+@bot.event
+async def on_member_remove(member):
+    config = server_config[member.guild.id]
+    channel_id = config.get("leave_channel")
+    if not channel_id:
+        return
+    
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+    
+    if config.get("leave_embed"):
+        embed_data = config["leave_embed"]
+        embed = discord.Embed(
+            title=embed_data.get("title", "Au revoir!").replace("{user}", member.name),
+            description=embed_data.get("description", "").replace("{user}", member.name).replace("{server}", member.guild.name),
+            color=discord.Color.red()
+        )
+        await channel.send(embed=embed)
+    else:
+        msg = config["leave_msg"].replace("{user}", member.name).replace("{server}", member.guild.name)
+        await channel.send(msg)
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    
+    # Automod
+    config = server_config[message.guild.id]
+    for word in config["automod_words"]:
+        if word.lower() in message.content.lower():
+            await message.delete()
+            await message.channel.send(f"{message.author.mention}, ce mot est interdit!", delete_after=5)
             return
-
-
-@bot.command(name='mute')
-@commands.has_permissions(manage_members=True)
-async def mute_member(ctx, member: discord.Member, time_str: str = "60m", *, reason: str = "Aucune raison spécifiée."):
-    """Met un membre en sourdine temporairement (timeout)."""
     
-    # 1. Parsing du temps (réutilise le code de !timer)
-    match = re.match(r"(\d+)([smhd])", time_str.lower())
-    if not match:
-        return await ctx.send("❌ Format de temps invalide. Utilisez par exemple `30m`, `1h`, `5s`.", delete_after=10)
+    # XP système
+    user_data = economy_data[f"{message.guild.id}_{message.author.id}"]
+    xp_gain = random.randint(10, 25)
+    user_data["xp"] += xp_gain
+    
+    xp_needed = user_data["level"] * 100
+    if user_data["xp"] >= xp_needed:
+        user_data["level"] += 1
+        user_data["xp"] = 0
+        await message.channel.send(f"🎉 {message.author.mention} a atteint le niveau {user_data['level']}!")
+    
+    await bot.process_commands(message)
 
-    value = int(match.group(1))
-    unit = match.group(2)
+# ============= HELP COMMAND =============
+class HelpView(View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.category = "moderation"
     
-    if unit == 's': duration = timedelta(seconds=value)
-    elif unit == 'm': duration = timedelta(minutes=value)
-    elif unit == 'h': duration = timedelta(hours=value)
-    elif unit == 'd': duration = timedelta(days=value)
-    else: return await ctx.send("❌ Unité de temps non reconnue.", delete_after=10)
+    @discord.ui.button(label="Modération", style=discord.ButtonStyle.primary, emoji="🛡️")
+    async def moderation_btn(self, interaction: discord.Interaction, button: Button):
+        self.category = "moderation"
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
     
-    if duration.total_seconds() > 2419200: # Limite Discord de 28 jours (2419200 secondes)
-        return await ctx.send("❌ Le timeout ne peut pas dépasser 28 jours.", delete_after=10)
+    @discord.ui.button(label="Économie", style=discord.ButtonStyle.success, emoji="💰")
+    async def economy_btn(self, interaction: discord.Interaction, button: Button):
+        self.category = "economy"
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    @discord.ui.button(label="Fun", style=discord.ButtonStyle.danger, emoji="🎮")
+    async def fun_btn(self, interaction: discord.Interaction, button: Button):
+        self.category = "fun"
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    @discord.ui.button(label="Utilitaires", style=discord.ButtonStyle.secondary, emoji="🔧")
+    async def utility_btn(self, interaction: discord.Interaction, button: Button):
+        self.category = "utility"
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    def get_embed(self):
+        embeds = {
+            "moderation": discord.Embed(
+                title="🛡️ Commandes de Modération",
+                description=(
+                    "**!mute** `<membre> <temps> [raison]` - Met en sourdine un membre\n"
+                    "**!unmute** `<membre>` - Retire la sourdine\n"
+                    "**!kick** `<membre> [raison]` - Expulse un membre\n"
+                    "**!ban** `<membre> [raison]` - Banni un membre\n"
+                    "**!lock** `[salon]` - Verrouille un salon\n"
+                    "**!unlock** `[salon]` - Déverrouille un salon\n"
+                    "**!clear** `<nombre>` - Supprime des messages\n"
+                    "**!warn** `<membre> <raison>` - Avertit un membre\n"
+                    "**!warnings** `<membre>` - Affiche les avertissements\n"
+                    "**!clearwarn** `<membre> [index]` - Retire un avertissement"
+                ),
+                color=discord.Color.blue()
+            ),
+            "economy": discord.Embed(
+                title="💰 Commandes d'Économie",
+                description=(
+                    "**!daily** - Récompense journalière\n"
+                    "**!balance** `[membre]` - Affiche la monnaie\n"
+                    "**!rep** `<membre>` - Donne de la réputation\n"
+                    "**!shop** - Affiche la boutique\n"
+                    "**!buy** `<id>` - Achète un rôle\n"
+                    "**!dice** `[montant]` - Jeu de dés\n"
+                    "**!pay** `<membre> <montant>` - Transfère de l'argent\n"
+                    "**!leaderboard** - Classement des joueurs\n"
+                    "**!work** - Gagne de l'argent\n"
+                    "**!beg** - Demande l'aumône"
+                ),
+                color=discord.Color.gold()
+            ),
+            "fun": discord.Embed(
+                title="🎮 Commandes Fun",
+                description=(
+                    "**!8ball** `<question>` - Boule magique\n"
+                    "**!joke** - Envoie une blague\n"
+                    "**!quote** - Citation inspirante\n"
+                    "**!ascii** `<texte>` - Convertit en ASCII art\n"
+                    "**!coinflip** - Lance une pièce\n"
+                    "**!rate** `<chose>` - Évalue quelque chose\n"
+                    "**!ship** `<membre1> <membre2>` - Calcule l'affinité\n"
+                    "**!choose** `<opt1>, <opt2>...` - Aide à choisir"
+                ),
+                color=discord.Color.red()
+            ),
+            "utility": discord.Embed(
+                title="🔧 Commandes Utilitaires",
+                description=(
+                    "**!userinfo** `[membre]` - Info sur un membre\n"
+                    "**!serverinfo** - Info sur le serveur\n"
+                    "**!timer** `<temps> [raison]` - Minuteur\n"
+                    "**!automod** `add/list` - Gère les mots interdits\n"
+                    "**!config** - Menu de configuration\n"
+                    "**!bvntext** `[message]` - Message de bienvenue\n"
+                    "**!bvnembed** `[titre | description]` - Embed de bienvenue\n"
+                    "**!leavetext** `[message]` - Message de départ\n"
+                    "**!leaveembed** `[titre | description]` - Embed de départ"
+                ),
+                color=discord.Color.greyple()
+            )
+        }
+        return embeds[self.category]
+
+@bot.command()
+async def help(ctx):
+    view = HelpView()
+    await ctx.send(embed=view.get_embed(), view=view)
+
+# ============= CONFIG COMMAND =============
+class ConfigView(View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+    
+    @discord.ui.button(label="Salon Bienvenue", style=discord.ButtonStyle.primary, emoji="👋")
+    async def welcome_channel(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("Mentionnez le salon pour les messages de bienvenue:", ephemeral=True)
         
-    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
-        return await ctx.send("❌ Vous ne pouvez pas mute un membre ayant un rôle égal ou supérieur au vôtre.")
+        def check(m):
+            return m.author == interaction.user and m.channel == interaction.channel
+        
+        try:
+            msg = await bot.wait_for('message', check=check, timeout=60)
+            if msg.channel_mentions:
+                server_config[self.guild_id]["welcome_channel"] = msg.channel_mentions[0].id
+                await interaction.followup.send(f"✅ Salon de bienvenue défini: {msg.channel_mentions[0].mention}", ephemeral=True)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("❌ Temps écoulé!", ephemeral=True)
     
-    if member.bot:
-        return await ctx.send("❌ Je ne peux pas mute un bot.", delete_after=10)
-
-    try:
-        # Utiliser l'API timeout (mise en sourdine)
-        until_time = datetime.now(timezone.utc) + duration
-        await member.timeout(until_time, reason=reason)
+    @discord.ui.button(label="Salon Départ", style=discord.ButtonStyle.primary, emoji="👋")
+    async def leave_channel(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("Mentionnez le salon pour les messages de départ:", ephemeral=True)
         
-        formatted_duration = format_timedelta(duration)
+        def check(m):
+            return m.author == interaction.user and m.channel == interaction.channel
         
-        await ctx.send(f"🔇 **{member.display_name}** a été mis en sourdine pour **{formatted_duration}**.\n**Raison:** {reason}")
-        
-        # Log
-        await send_log_embed(ctx.guild, 
-                             "🔇 Utilisateur Mute", 
-                             discord.Color.orange(), 
-                             [
-                                 ("Utilisateur", member.mention),
-                                 ("Modérateur", ctx.author.mention),
-                                 ("Durée", formatted_duration),
-                                 ("Raison", reason)
-                             ])
-
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions pour mute ce membre. Vérifiez ma hiérarchie de rôles.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors du mute : {e}")
-
-@bot.command(name='unmute')
-@commands.has_permissions(manage_members=True)
-async def unmute_member(ctx, member: discord.Member):
-    """Retire le rôle de sourdine (timeout)."""
+        try:
+            msg = await bot.wait_for('message', check=check, timeout=60)
+            if msg.channel_mentions:
+                server_config[self.guild_id]["leave_channel"] = msg.channel_mentions[0].id
+                await interaction.followup.send(f"✅ Salon de départ défini: {msg.channel_mentions[0].mention}", ephemeral=True)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("❌ Temps écoulé!", ephemeral=True)
     
-    try:
-        if not member.timed_out:
-            return await ctx.send(f"✅ **{member.display_name}** n'est pas en sourdine (timeout).", delete_after=10)
-            
-        await member.timeout(None, reason="Unmute manuel par modérateur.") # Set to None pour retirer le timeout
+    @discord.ui.button(label="Voir Config", style=discord.ButtonStyle.success, emoji="📋")
+    async def view_config(self, interaction: discord.Interaction, button: Button):
+        config = server_config[self.guild_id]
+        embed = discord.Embed(title="⚙️ Configuration du Serveur", color=discord.Color.blue())
         
-        await ctx.send(f"🔊 **{member.display_name}** a été réactivé (unmute).")
+        welcome_ch = bot.get_channel(config["welcome_channel"]) if config["welcome_channel"] else None
+        leave_ch = bot.get_channel(config["leave_channel"]) if config["leave_channel"] else None
         
-        # Log
-        await send_log_embed(ctx.guild, 
-                             "🔊 Utilisateur Unmute", 
-                             discord.Color.green(), 
-                             [
-                                 ("Utilisateur", member.mention),
-                                 ("Modérateur", ctx.author.mention),
-                             ])
-                             
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions pour unmute ce membre.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors de l'unmute : {e}")
-
-
-@bot.command(name='kick')
-@commands.has_permissions(kick_members=True)
-async def kick_member(ctx, member: discord.Member, *, reason: str = "Aucune raison spécifiée."):
-    """Expulse un membre du serveur."""
-    
-    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
-        return await ctx.send("❌ Vous ne pouvez pas expulser un membre ayant un rôle égal ou supérieur au vôtre.")
-    
-    if member.bot:
-        return await ctx.send("❌ Je ne peux pas expulser un bot.", delete_after=10)
-
-    try:
-        # Tenter d'envoyer un MP avant
-        await member.send(f"Vous avez été expulsé du serveur **{ctx.guild.name}**.\n**Raison:** {reason}")
-    except:
-        # Ignore si l'envoi de MP échoue
-        pass
-
-    try:
-        await member.kick(reason=reason)
-        await ctx.send(f"✅ **{member.display_name}** a été expulsé.\n**Raison:** {reason}")
+        embed.add_field(name="Salon Bienvenue", value=welcome_ch.mention if welcome_ch else "Non défini", inline=False)
+        embed.add_field(name="Salon Départ", value=leave_ch.mention if leave_ch else "Non défini", inline=False)
+        embed.add_field(name="Mots Interdits", value=f"{len(config['automod_words'])} mots", inline=False)
+        embed.add_field(name="Articles Boutique", value=f"{len(config['shop'])} articles", inline=False)
         
-        # Log
-        await send_log_embed(ctx.guild, 
-                             "👢 Utilisateur Expulsé (Kick)", 
-                             discord.Color.red(), 
-                             [
-                                 ("Utilisateur", f"{member.name} ({member.id})"),
-                                 ("Modérateur", ctx.author.mention),
-                                 ("Raison", reason)
-                             ])
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions nécessaires pour expulser ce membre. Vérifiez ma hiérarchie.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors de l'expulsion : {e}")
-
-
-@bot.command(name='ban')
-@commands.has_permissions(ban_members=True)
-async def ban_member(ctx, member: discord.Member, *, reason: str = "Aucune raison spécifiée."):
-    """Banni un membre du serveur."""
-    
-    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
-        return await ctx.send("❌ Vous ne pouvez pas bannir un membre ayant un rôle égal ou supérieur au vôtre.")
-    
-    if member.bot:
-        return await ctx.send("❌ Je ne peux pas bannir un bot.", delete_after=10)
-
-    try:
-        # Tenter d'envoyer un MP avant
-        await member.send(f"Vous avez été banni du serveur **{ctx.guild.name}**.\n**Raison:** {reason}")
-    except:
-        # Ignore si l'envoi de MP échoue
-        pass
-        
-    try:
-        await member.ban(reason=reason)
-        await ctx.send(f"🔨 **{member.display_name}** a été banni.\n**Raison:** {reason}")
-        
-        # Log
-        await send_log_embed(ctx.guild, 
-                             "🔨 Utilisateur Banni", 
-                             discord.Color.dark_red(), 
-                             [
-                                 ("Utilisateur", f"{member.name} ({member.id})"),
-                                 ("Modérateur", ctx.author.mention),
-                                 ("Raison", reason)
-                             ])
-
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions nécessaires pour bannir ce membre. Vérifiez ma hiérarchie.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors du bannissement : {e}")
-
-# Importation nécessaire pour le mute
-from datetime import timezone
-    # --- COMMANDES D'ÉCONOMIE & GAMING (Partie 3/3) ---
-
-@bot.command(name='daily')
-@commands.cooldown(1, DAILY_COOLDOWN, commands.BucketType.user)
-async def daily_currency(ctx):
-    """Réclame la monnaie journalière."""
-    data = get_user_data(str(ctx.author.id))
-    daily_amount = random.randint(300, 700)
-    data['currency'] += daily_amount
-    
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def config(ctx):
+    view = ConfigView(ctx.guild.id)
     embed = discord.Embed(
-        title="☀️ Récompense Journalière",
-        description=f"Vous avez réclamé **{daily_amount} 💰** !\nVous avez maintenant **{data['currency']} 💰**.",
-        color=discord.Color.gold(),
-        timestamp=datetime.now()
-    )
-    await ctx.send(embed=embed)
-
-# Gestion de l'erreur du cooldown pour !daily
-@daily_currency.error
-async def daily_currency_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        remaining = format_timedelta(timedelta(seconds=error.retry_after))
-        await ctx.send(f"⏳ Vous avez déjà réclamé votre récompense journalière. Réessayez dans **{remaining}**.", delete_after=10)
-    else:
-        # Relance les autres erreurs
-        raise error
-
-@bot.command(name='balance', aliases=['bal'])
-async def show_balance(ctx, member: discord.Member = None):
-    """Affiche la balance de monnaie d'un utilisateur."""
-    member = member or ctx.author
-    data = get_user_data(str(member.id))
-    
-    embed = discord.Embed(
-        title=f"💸 Balance de {member.display_name}",
-        description=f"**Monnaie :** {data['currency']} 💰\n**Réputation :** {data['rep']} ⭐",
-        color=discord.Color.dark_teal()
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    await ctx.send(embed=embed)
-
-@bot.command(name='rep')
-@commands.cooldown(1, REP_COOLDOWN, commands.BucketType.user)
-async def give_reputation(ctx, member: discord.Member):
-    """Donne un point de réputation à un membre (une fois par jour)."""
-    if member.id == ctx.author.id:
-        return await ctx.send("❌ Vous ne pouvez pas vous donner de réputation à vous-même.", delete_after=10)
-    if member.bot:
-        return await ctx.send("❌ Vous ne pouvez pas donner de réputation à un bot.", delete_after=10)
-        
-    data = get_user_data(str(member.id))
-    data['rep'] += 1
-    
-    await ctx.send(f"⭐ **{ctx.author.display_name}** a donné un point de réputation à **{member.display_name}** ! Ils ont maintenant **{data['rep']}** points.")
-
-@give_reputation.error
-async def give_reputation_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        remaining = format_timedelta(timedelta(seconds=error.retry_after))
-        await ctx.send(f"⏳ Vous avez déjà donné un point de réputation aujourd'hui. Réessayez dans **{remaining}**.", delete_after=10)
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ Veuillez mentionner le membre à qui vous souhaitez donner de la réputation. Exemple: `!rep @Utilisateur`.", delete_after=10)
-    else:
-        raise error
-
-@bot.command(name='shop')
-async def shop(ctx):
-    """Affiche la boutique de rôles."""
-    if not SHOP_ROLES:
-        return await ctx.send("🛍️ La boutique de rôles est actuellement vide.", delete_after=10)
-        
-    description = "Utilisez `!buy <ID_DU_RÔLE>` pour acheter un rôle.\n\n"
-    
-    for role_id_str, price in SHOP_ROLES.items():
-        role_id = int(role_id_str)
-        role = ctx.guild.get_role(role_id)
-        if role:
-            description += f"**Rôle:** {role.mention}\n"
-            description += f"**ID:** `{role_id}`\n"
-            description += f"**Prix:** {price} 💰\n---\n"
-            
-    embed = discord.Embed(
-        title="🛒 Boutique de Rôles",
-        description=description,
+        title="⚙️ Configuration du Serveur",
+        description="Utilisez les boutons ci-dessous pour configurer le bot:",
         color=discord.Color.blue()
     )
+    await ctx.send(embed=embed, view=view)
+
+# ============= MODERATION COMMANDS =============
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def mute(ctx, member: discord.Member, duration: str, *, reason="Aucune raison"):
+    time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    unit = duration[-1]
+    if unit not in time_units:
+        return await ctx.send("❌ Format: 10s, 5m, 2h, 1d")
+    
+    amount = int(duration[:-1])
+    seconds = amount * time_units[unit]
+    
+    await member.timeout(timedelta(seconds=seconds), reason=reason)
+    embed = discord.Embed(title="🔇 Membre Muté", color=discord.Color.orange())
+    embed.add_field(name="Membre", value=member.mention, inline=False)
+    embed.add_field(name="Durée", value=duration, inline=False)
+    embed.add_field(name="Raison", value=reason, inline=False)
+    embed.add_field(name="Modérateur", value=ctx.author.mention, inline=False)
     await ctx.send(embed=embed)
 
-@bot.command(name='buy')
-async def buy_role(ctx, role_id: int):
-    """Achète un rôle de la boutique."""
-    role_id_str = str(role_id)
-    if role_id_str not in SHOP_ROLES:
-        return await ctx.send("❌ Cet ID de rôle n'est pas dans la boutique.", delete_after=10)
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def unmute(ctx, member: discord.Member):
+    await member.timeout(None)
+    await ctx.send(f"✅ {member.mention} n'est plus en sourdine.")
 
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason="Aucune raison"):
+    await member.kick(reason=reason)
+    embed = discord.Embed(title="👢 Membre Expulsé", color=discord.Color.red())
+    embed.add_field(name="Membre", value=f"{member}", inline=False)
+    embed.add_field(name="Raison", value=reason, inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member, *, reason="Aucune raison"):
+    await member.ban(reason=reason)
+    embed = discord.Embed(title="🔨 Membre Banni", color=discord.Color.dark_red())
+    embed.add_field(name="Membre", value=f"{member}", inline=False)
+    embed.add_field(name="Raison", value=reason, inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def lock(ctx, channel: discord.TextChannel = None):
+    channel = channel or ctx.channel
+    await channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    await ctx.send(f"🔒 {channel.mention} est maintenant verrouillé.")
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def unlock(ctx, channel: discord.TextChannel = None):
+    channel = channel or ctx.channel
+    await channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    await ctx.send(f"🔓 {channel.mention} est maintenant déverrouillé.")
+
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, amount: int):
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    msg = await ctx.send(f"🗑️ {len(deleted)-1} messages supprimés.")
+    await asyncio.sleep(3)
+    await msg.delete()
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def warn(ctx, member: discord.Member, *, reason):
+    key = f"{ctx.guild.id}_{member.id}"
+    warnings_data[key].append({
+        "reason": reason,
+        "moderator": str(ctx.author),
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+    })
+    await ctx.send(f"⚠️ {member.mention} a reçu un avertissement.\n**Raison:** {reason}")
+
+@bot.command()
+async def warnings(ctx, member: discord.Member):
+    key = f"{ctx.guild.id}_{member.id}"
+    warns = warnings_data[key]
+    
+    if not warns:
+        return await ctx.send(f"{member.mention} n'a aucun avertissement.")
+    
+    embed = discord.Embed(title=f"⚠️ Avertissements de {member}", color=discord.Color.orange())
+    for i, warn in enumerate(warns, 1):
+        embed.add_field(
+            name=f"#{i} - {warn['date']}",
+            value=f"**Raison:** {warn['reason']}\n**Par:** {warn['moderator']}",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def clearwarn(ctx, member: discord.Member, index: int = None):
+    key = f"{ctx.guild.id}_{member.id}"
+    
+    if index is None:
+        warnings_data[key] = []
+        await ctx.send(f"✅ Tous les avertissements de {member.mention} ont été supprimés.")
+    else:
+        if 1 <= index <= len(warnings_data[key]):
+            warnings_data[key].pop(index - 1)
+            await ctx.send(f"✅ Avertissement #{index} supprimé pour {member.mention}.")
+        else:
+            await ctx.send("❌ Index invalide.")
+
+# ============= ECONOMY COMMANDS =============
+@bot.command()
+async def daily(ctx):
+    key = f"{ctx.guild.id}_{ctx.author.id}"
+    user_data = economy_data[key]
+    
+    last_claim = user_data.get("daily_claimed")
+    if last_claim:
+        next_claim = datetime.fromisoformat(last_claim) + timedelta(days=1)
+        if datetime.now() < next_claim:
+            remaining = next_claim - datetime.now()
+            hours, remainder = divmod(int(remaining.total_seconds()), 3600)
+            minutes = remainder // 60
+            return await ctx.send(f"⏰ Revenez dans {hours}h {minutes}m pour votre récompense quotidienne!")
+    
+    reward = random.randint(500, 1000)
+    user_data["money"] += reward
+    user_data["daily_claimed"] = datetime.now().isoformat()
+    
+    embed = discord.Embed(title="🎁 Récompense Quotidienne", color=discord.Color.green())
+    embed.description = f"Vous avez reçu **{reward}€**!"
+    await ctx.send(embed=embed)
+
+@bot.command(aliases=["bal"])
+async def balance(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    key = f"{ctx.guild.id}_{member.id}"
+    user_data = economy_data[key]
+    
+    embed = discord.Embed(title=f"💰 Profil de {member.name}", color=discord.Color.gold())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Argent", value=f"{user_data['money']}€", inline=True)
+    embed.add_field(name="Niveau", value=user_data['level'], inline=True)
+    embed.add_field(name="XP", value=f"{user_data['xp']}/{user_data['level']*100}", inline=True)
+    embed.add_field(name="Réputation", value=user_data['rep'], inline=True)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def rep(ctx, member: discord.Member):
+    if member == ctx.author:
+        return await ctx.send("❌ Vous ne pouvez pas vous donner de réputation!")
+    
+    key = f"{ctx.guild.id}_{member.id}"
+    economy_data[key]["rep"] += 1
+    await ctx.send(f"⭐ Vous avez donné 1 point de réputation à {member.mention}!")
+
+@bot.command()
+async def shop(ctx):
+    config = server_config[ctx.guild.id]
+    shop_items = config["shop"]
+    
+    if not shop_items:
+        return await ctx.send("🛒 La boutique est vide!")
+    
+    embed = discord.Embed(title="🛒 Boutique du Serveur", color=discord.Color.blue())
+    for item in shop_items:
+        role = ctx.guild.get_role(item["role_id"])
+        if role:
+            embed.add_field(
+                name=f"{role.name}",
+                value=f"Prix: {item['price']}€\nID: {item['role_id']}",
+                inline=False
+            )
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def buy(ctx, role_id: int):
+    config = server_config[ctx.guild.id]
+    item = next((i for i in config["shop"] if i["role_id"] == role_id), None)
+    
+    if not item:
+        return await ctx.send("❌ Cet article n'existe pas!")
+    
+    key = f"{ctx.guild.id}_{ctx.author.id}"
+    user_data = economy_data[key]
+    
+    if user_data["money"] < item["price"]:
+        return await ctx.send(f"❌ Vous n'avez pas assez d'argent! (Besoin: {item['price']}€)")
+    
     role = ctx.guild.get_role(role_id)
     if not role:
-        return await ctx.send("❌ Ce rôle n'existe pas ou n'est plus disponible.", delete_after=10)
-        
-    price = SHOP_ROLES[role_id_str]
-    user_data = get_user_data(str(ctx.author.id))
+        return await ctx.send("❌ Ce rôle n'existe plus!")
     
     if role in ctx.author.roles:
-        return await ctx.send(f"✅ Vous possédez déjà le rôle {role.mention}.", delete_after=10)
-
-    if user_data['currency'] < price:
-        needed = price - user_data['currency']
-        return await ctx.send(f"❌ Vous n'avez pas assez de monnaie. Il vous manque **{needed} 💰**.", delete_after=10)
-
-    try:
-        await ctx.author.add_roles(role, reason="Achat de rôle via la boutique.")
-        user_data['currency'] -= price
-        await ctx.send(f"🎉 Félicitations **{ctx.author.display_name}** ! Vous avez acheté et reçu le rôle {role.mention} pour **{price} 💰**.\nBalance restante : **{user_data['currency']} 💰**.")
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions d'ajouter ce rôle. Vérifiez ma hiérarchie et mes permissions.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors de l'achat : {e}")
-
-# Exemple de mini-jeu : !dice (dé)
-@bot.command(name='dice')
-async def dice_roll(ctx, amount: int = None):
-    """Joue aux dés : parie de la monnaie (si un montant est spécifié) et tente de gagner."""
+        return await ctx.send("❌ Vous avez déjà ce rôle!")
     
-    user_data = get_user_data(str(ctx.author.id))
-    roll = random.randint(1, 100)
-    
-    if amount:
-        if amount <= 0:
-            return await ctx.send("❌ Le montant du pari doit être positif.", delete_after=10)
-        if amount > user_data['currency']:
-            return await ctx.send(f"❌ Vous n'avez pas assez de monnaie pour parier {amount} 💰.", delete_after=10)
+    user_data["money"] -= item["price"]
+    await ctx.author.add_roles(role)
+    await ctx.send(f"✅ Vous avez acheté le rôle {role.mention}!")
 
-        # Logique de pari (Exemple simple : Gain si > 60)
-        if roll > 60:
-            gain = amount * 2
-            user_data['currency'] += gain
-            message = f"🎲 **{ctx.author.display_name}** a fait **{roll}** et **GAGNE** ! Vous recevez **{gain} 💰**.\nBalance : {user_data['currency']} 💰."
-        else:
-            user_data['currency'] -= amount
-            message = f"🎲 **{ctx.author.display_name}** a fait **{roll}** et **PERD** 😞. Vous perdez **{amount} 💰**.\nBalance : {user_data['currency']} 💰."
+@bot.command()
+async def dice(ctx, amount: int = 100):
+    key = f"{ctx.guild.id}_{ctx.author.id}"
+    user_data = economy_data[key]
     
+    if amount > user_data["money"]:
+        return await ctx.send("❌ Vous n'avez pas assez d'argent!")
+    
+    result = random.randint(1, 6)
+    
+    if result >= 4:
+        winnings = amount * 2
+        user_data["money"] += amount
+        await ctx.send(f"🎲 Vous avez obtenu **{result}**! Vous gagnez {winnings}€!")
     else:
-        # Simple jet de dés sans pari
-        message = f"🎲 Jet de dés : **{roll}**."
-        
-    await ctx.send(message)
+        user_data["money"] -= amount
+        await ctx.send(f"🎲 Vous avez obtenu **{result}**... Vous perdez {amount}€.")
 
+@bot.command()
+async def pay(ctx, member: discord.Member, amount: int):
+    if member == ctx.author:
+        return await ctx.send("❌ Vous ne pouvez pas vous payer vous-même!")
+    
+    key_sender = f"{ctx.guild.id}_{ctx.author.id}"
+    key_receiver = f"{ctx.guild.id}_{member.id}"
+    
+    if economy_data[key_sender]["money"] < amount:
+        return await ctx.send("❌ Vous n'avez pas assez d'argent!")
+    
+    economy_data[key_sender]["money"] -= amount
+    economy_data[key_receiver]["money"] += amount
+    await ctx.send(f"✅ Vous avez envoyé {amount}€ à {member.mention}!")
 
-# --- COMMANDES FUN & DIVERS (Partie 3/3) ---
-
-@bot.command(name='8ball')
-async def eight_ball(ctx, *, question: str):
-    """Posez une question à la boule magique 8-ball."""
-    if not question.endswith('?'):
-        return await ctx.send("❌ Veuillez poser une question se terminant par un point d'interrogation.")
-        
-    response = random.choice(BALL_RESPONSES)
+@bot.command(aliases=["top"])
+async def leaderboard(ctx, type="money"):
+    guild_users = {k: v for k, v in economy_data.items() if k.startswith(f"{ctx.guild.id}_")}
+    
+    if not guild_users:
+        return await ctx.send("❌ Aucune donnée disponible!")
+    
+    sorted_users = sorted(guild_users.items(), key=lambda x: x[1][type], reverse=True)[:10]
     
     embed = discord.Embed(
-        title="🎱 Boule Magique 8-Ball",
-        color=discord.Color.blurple()
+        title=f"🏆 Classement - {type.capitalize()}",
+        color=discord.Color.gold()
     )
-    embed.add_field(name="❓ Question", value=question, inline=False)
-    embed.add_field(name="🔮 Réponse", value=f"**{response}**", inline=False)
+    
+    for i, (key, data) in enumerate(sorted_users, 1):
+        user_id = int(key.split("_")[1])
+        user = ctx.guild.get_member(user_id)
+        if user:
+            value = data[type]
+            emoji = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"**{i}.**"
+            embed.add_field(
+                name=f"{emoji} {user.name}",
+                value=f"{value}{'€' if type == 'money' else ' XP' if type == 'xp' else ''}",
+                inline=False
+            )
     
     await ctx.send(embed=embed)
 
-@bot.command(name='joke', aliases=['blague'])
-async def send_joke(ctx):
-    """Raconte une blague aléatoire."""
-    joke = random.choice(JOKES)
-    await ctx.send(f"😂 {joke}")
-
-@bot.command(name='quote', aliases=['citation'])
-async def send_quote(ctx):
-    """Affiche une citation inspirante aléatoire."""
-    quote = random.choice(QUOTES)
-    await ctx.send(f"📜 {quote}")
-
-@bot.command(name='ascii')
-async def ascii_art(ctx, *, text: str):
-    """Transforme un texte en art ASCII."""
-    if len(text) > 20:
-        return await ctx.send("❌ Texte trop long (max 20 caractères) pour l'art ASCII.", delete_after=10)
-        
-    f = Figlet(font='standard') # 'standard' est un bon choix pour Discord
-    ascii_text = f.renderText(text)
+@bot.command()
+async def work(ctx):
+    key = f"{ctx.guild.id}_{ctx.author.id}"
+    user_data = economy_data[key]
     
-    # Envoi dans un bloc de code pour préserver la mise en page
-    if len(ascii_text) > 2000:
-        await ctx.send("❌ L'art ASCII généré est trop long pour un message Discord.")
-    else:
-        await ctx.send(f"```\n{ascii_text}\n```")
-
-@bot.command(name='say')
-@commands.has_permissions(manage_messages=True)
-async def say_message(ctx, channel: discord.TextChannel = None, *, message: str):
-    """(Modération) Envoie un message spécifié dans un salon donné ou le salon actuel."""
+    last_work = user_data.get("work_claimed")
+    if last_work:
+        next_work = datetime.fromisoformat(last_work) + timedelta(hours=1)
+        if datetime.now() < next_work:
+            remaining = next_work - datetime.now()
+            minutes = int(remaining.total_seconds() // 60)
+            return await ctx.send(f"⏰ Vous devez attendre {minutes} minutes avant de retravailler!")
     
-    # Si le premier argument n'est pas un salon valide, on suppose que le salon est le salon actuel
-    # et que le message commence par ce qui était censé être le salon.
-    if channel is None:
-        channel = ctx.channel
-        message = message
-    else:
-        # Vérifiez si le salon existe réellement et s'il est différent du salon actuel
-        # Le code de commands.TextChannel fait déjà cette vérification,
-        # mais on doit s'assurer que le message n'est pas vide
-        if not message:
-            return await ctx.send("❌ Veuillez fournir le message à envoyer.", delete_after=10)
+    jobs = ["développeur", "designer", "manager", "consultant", "vendeur"]
+    job = random.choice(jobs)
+    earnings = random.randint(200, 500)
+    
+    user_data["money"] += earnings
+    user_data["work_claimed"] = datetime.now().isoformat()
+    
+    await ctx.send(f"💼 Vous avez travaillé comme **{job}** et gagné **{earnings}€**!")
 
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass # Ne peut pas supprimer le message
+@bot.command()
+async def beg(ctx):
+    if random.random() < 0.5:
+        earnings = random.randint(10, 50)
+        key = f"{ctx.guild.id}_{ctx.author.id}"
+        economy_data[key]["money"] += earnings
+        await ctx.send(f"🙏 Quelqu'un vous a donné {earnings}€!")
+    else:
+        await ctx.send("🙅 Personne ne vous a donné d'argent...")
+
+# ============= FUN COMMANDS =============
+@bot.command()
+async def eightball(ctx, *, question):
+    responses = [
+        "Oui, absolument!", "C'est certain.", "Sans aucun doute.",
+        "Probablement.", "Les signes pointent vers oui.",
+        "Réessayez plus tard.", "Mieux vaut ne pas le dire maintenant.",
+        "Je ne peux pas prédire maintenant.", "Concentrez-vous et redemandez.",
+        "N'y comptez pas.", "Ma réponse est non.", "Mes sources disent non."
+    ]
+    await ctx.send(f"🎱 {random.choice(responses)}")
+
+@bot.command(aliases=["blague"])
+async def joke(ctx):
+    jokes = [
+        "Pourquoi les plongeurs plongent-ils toujours en arrière? Parce que sinon ils tombent dans le bateau!",
+        "Qu'est-ce qu'un crocodile qui surveille la pharmacie? Un Lacoste-Garde!",
+        "Comment appelle-t-on un chat tombé dans un pot de peinture? Un chat-peauté!",
+        "Que dit un escargot quand il croise une limace? Oh, un naturiste!",
+        "Qu'est-ce qu'un canif? Un petit fien!"
+    ]
+    await ctx.send(f"😂 {random.choice(jokes)}")
+
+@bot.command(aliases=["citation"])
+async def quote(ctx):
+    quotes = [
+        "Le succès c'est d'aller d'échec en échec sans perdre son enthousiasme. - Winston Churchill",
+        "La vie c'est comme une bicyclette, il faut avancer pour ne pas perdre l'équilibre. - Albert Einstein",
+        "L'avenir appartient à ceux qui croient en la beauté de leurs rêves. - Eleanor Roosevelt",
+        "Soyez le changement que vous voulez voir dans le monde. - Gandhi",
+        "Le seul moyen de faire du bon travail est d'aimer ce que vous faites. - Steve Jobs"
+    ]
+    await ctx.send(f"💭 {random.choice(quotes)}")
+
+@bot.command()
+async def ascii(ctx, *, text: str):
+    ascii_art = {
+        'a': '  ▄▀█  ', 'b': ' █▄▄  ', 'c': ' █▀▀  ', 'd': ' █▀▄  ', 'e': ' █▀▀  ',
+        'f': ' █▀▀  ', 'g': ' █▀▀▀ ', 'h': ' █░█  ', 'i': ' █  ', 'j': ' █▀▀█ ',
+        'k': ' █▄▀  ', 'l': ' █░░  ', 'm': ' █▀▄▀█ ', 'n': ' █▄░█ ', 'o': ' █▀█  ',
+        'p': ' █▀█  ', 'q': ' █▀█▄ ', 'r': ' █▀█  ', 's': ' █▀▀  ', 't': ' ▀█▀  ',
+        'u': ' █░█  ', 'v': ' █░█  ', 'w': ' █░█░█ ', 'x': ' ▀▄▀  ', 'y': ' █▄█  ',
+        'z': ' ▀█  ', ' ': '    '
+    }
+    
+    result = ""
+    for char in text.lower()[:10]:
+        if char in ascii_art:
+            result += ascii_art[char]
+    
+    await ctx.send(f"```\n{result}\n```")
+
+@bot.command()
+async def coinflip(ctx):
+    result = random.choice(["Pile", "Face"])
+    await ctx.send(f"🪙 Résultat: **{result}**!")
+
+@bot.command()
+async def rate(ctx, *, thing: str):
+    rating = random.randint(0, 100)
+    await ctx.send(f"Je donne à **{thing}** un score de **{rating}/100**! {'🔥' if rating > 80 else '👍' if rating > 50 else '😐'}")
+
+@bot.command()
+async def ship(ctx, member1: discord.Member, member2: discord.Member):
+    percentage = random.randint(0, 100)
+    hearts = "❤️" * (percentage // 20)
+    ship_name = member1.name[:len(member1.name)//2] + member2.name[len(member2.name)//2:]
+    
+    embed = discord.Embed(title="💕 Ship-o-mètre", color=discord.Color.pink())
+    embed.add_field(name="Couple", value=f"{member1.mention} + {member2.mention}", inline=False)
+    embed.add_field(name="Nom du couple", value=ship_name, inline=False)
+    embed.add_field(name="Affinité", value=f"{hearts} {percentage}%", inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def choose(ctx, *, choices: str):
+    options = [opt.strip() for opt in choices.split(',')]
+    if len(options) < 2:
+        return await ctx.send("❌ Donnez au moins 2 options séparées par des virgules!")
+    
+    choice = random.choice(options)
+    await ctx.send(f"🎯 Je choisis: **{choice}**")
+
+# ============= UTILITY COMMANDS =============
+@bot.command()
+async def userinfo(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    
+    embed = discord.Embed(title=f"Informations sur {member}", color=member.color)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="ID", value=member.id, inline=False)
+    embed.add_field(name="Nom", value=str(member), inline=False)
+    embed.add_field(name="Surnom", value=member.display_name, inline=False)
+    embed.add_field(name="Compte créé le", value=member.created_at.strftime("%d/%m/%Y %H:%M"), inline=False)
+    embed.add_field(name="A rejoint le", value=member.joined_at.strftime("%d/%m/%Y %H:%M"), inline=False)
+    embed.add_field(name="Rôles", value=f"{len(member.roles)-1} rôles", inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def serverinfo(ctx):
+    guild = ctx.guild
+    
+    embed = discord.Embed(title=f"Informations sur {guild.name}", color=discord.Color.blue())
+    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    embed.add_field(name="ID", value=guild.id, inline=False)
+    embed.add_field(name="Propriétaire", value=guild.owner.mention, inline=False)
+    embed.add_field(name="Créé le", value=guild.created_at.strftime("%d/%m/%Y"), inline=False)
+    embed.add_field(name="Membres", value=guild.member_count, inline=True)
+    embed.add_field(name="Rôles", value=len(guild.roles), inline=True)
+    embed.add_field(name="Salons", value=len(guild.channels), inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def timer(ctx, duration: str, *, reason="Minuteur"):
+    time_units = {"s": 1, "m": 60, "h": 3600}
+    unit = duration[-1]
+    if unit not in time_units:
+        return await ctx.send("❌ Format: 30s, 5m, 1h")
+    
+    amount = int(duration[:-1])
+    seconds = amount * time_units[unit]
+    
+    await ctx.send(f"⏰ Minuteur de {duration} démarré pour: **{reason}**")
+    await asyncio.sleep(seconds)
+    await ctx.send(f"{ctx.author.mention} ⏰ Votre minuteur est terminé! **{reason}**")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def automod(ctx, action: str, *, word: str = None):
+    config = server_config[ctx.guild.id]
+    
+    if action.lower() == "add":
+        if not word:
+            return await ctx.send("❌ Spécifiez un mot à ajouter!")
+        config["automod_words"].append(word.lower())
+        await ctx.send(f"✅ Mot ajouté à l'automod: **{word}**")
+    
+    elif action.lower() == "list":
+        if not config["automod_words"]:
+            return await ctx.send("📝 Aucun mot interdit configuré.")
         
-    try:
-        await channel.send(message)
-    except discord.Forbidden:
-        await ctx.send(f"❌ Je n'ai pas la permission d'envoyer des messages dans {channel.mention}.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur lors de l'envoi du message : {e}")
+        embed = discord.Embed(title="🚫 Mots Interdits", color=discord.Color.red())
+        embed.description = "\n".join([f"• {w}" for w in config["automod_words"]])
+        await ctx.send(embed=embed)
+    
+    elif action.lower() == "remove":
+        if word and word.lower() in config["automod_words"]:
+            config["automod_words"].remove(word.lower())
+            await ctx.send(f"✅ Mot retiré: **{word}**")
+        else:
+            await ctx.send("❌ Ce mot n'est pas dans la liste!")
+
+# ============= WELCOME/LEAVE MESSAGES =============
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def bvntext(ctx, *, message: str = None):
+    if not message:
+        config = server_config[ctx.guild.id]
+        return await ctx.send(f"Message actuel: `{config['welcome_msg']}`\n\nVariables: `{{user}}` `{{server}}`")
+    
+    server_config[ctx.guild.id]["welcome_msg"] = message
+    server_config[ctx.guild.id]["welcome_embed"] = None
+    await ctx.send(f"✅ Message de bienvenue défini!\nAperçu: {message.replace('{user}', ctx.author.mention).replace('{server}', ctx.guild.name)}")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def bvnembed(ctx, *, content: str = None):
+    if not content or '|' not in content:
+        return await ctx.send("❌ Format: `!bvnembed Titre | Description`\n\nVariables: `{user}` `{server}`")
+    
+    parts = content.split('|', 1)
+    title = parts[0].strip()
+    description = parts[1].strip()
+    
+    server_config[ctx.guild.id]["welcome_embed"] = {"title": title, "description": description}
+    server_config[ctx.guild.id]["welcome_msg"] = None
+    
+    preview = discord.Embed(
+        title=title.replace("{user}", ctx.author.name),
+        description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name),
+        color=discord.Color.green()
+    )
+    await ctx.send("✅ Embed de bienvenue défini!\nAperçu:", embed=preview)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def leavetext(ctx, *, message: str = None):
+    if not message:
+        config = server_config[ctx.guild.id]
+        return await ctx.send(f"Message actuel: `{config['leave_msg']}`\n\nVariables: `{{user}}` `{{server}}`")
+    
+    server_config[ctx.guild.id]["leave_msg"] = message
+    server_config[ctx.guild.id]["leave_embed"] = None
+    await ctx.send(f"✅ Message de départ défini!\nAperçu: {message.replace('{user}', ctx.author.name).replace('{server}', ctx.guild.name)}")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def leaveembed(ctx, *, content: str = None):
+    if not content or '|' not in content:
+        return await ctx.send("❌ Format: `!leaveembed Titre | Description`\n\nVariables: `{user}` `{server}`")
+    
+    parts = content.split('|', 1)
+    title = parts[0].strip()
+    description = parts[1].strip()
+    
+    server_config[ctx.guild.id]["leave_embed"] = {"title": title, "description": description}
+    server_config[ctx.guild.id]["leave_msg"] = None
+    
+    preview = discord.Embed(
+        title=title.replace("{user}", ctx.author.name),
+        description=description.replace("{user}", ctx.author.name).replace("{server}", ctx.guild.name),
+        color=discord.Color.red()
+    )
+    await ctx.send("✅ Embed de départ défini!\nAperçu:", embed=preview)
+
+# ============= ADMIN ECONOMY COMMANDS =============
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def shopadd(ctx, role: discord.Role, price: int):
+    config = server_config[ctx.guild.id]
+    
+    if any(item["role_id"] == role.id for item in config["shop"]):
+        return await ctx.send("❌ Ce rôle est déjà dans la boutique!")
+    
+    config["shop"].append({"role_id": role.id, "price": price})
+    await ctx.send(f"✅ {role.mention} ajouté à la boutique pour {price}€!")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def shopremove(ctx, role: discord.Role):
+    config = server_config[ctx.guild.id]
+    config["shop"] = [item for item in config["shop"] if item["role_id"] != role.id]
+    await ctx.send(f"✅ {role.mention} retiré de la boutique!")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def givemoney(ctx, member: discord.Member, amount: int):
+    key = f"{ctx.guild.id}_{member.id}"
+    economy_data[key]["money"] += amount
+    await ctx.send(f"✅ {amount}€ ajouté à {member.mention}!")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def removemoney(ctx, member: discord.Member, amount: int):
+    key = f"{ctx.guild.id}_{member.id}"
+    economy_data[key]["money"] = max(0, economy_data[key]["money"] - amount)
+    await ctx.send(f"✅ {amount}€ retiré à {member.mention}!")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setlevel(ctx, member: discord.Member, level: int):
+    key = f"{ctx.guild.id}_{member.id}"
+    economy_data[key]["level"] = level
+    economy_data[key]["xp"] = 0
+    await ctx.send(f"✅ Niveau de {member.mention} défini à {level}!")
+
+# ============= ERROR HANDLING =============
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Vous n'avez pas la permission d'utiliser cette commande!")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Argument manquant! Utilisez `!help` pour plus d'infos.")
+    elif isinstance(error, commands.CommandNotFound):
+        pass
+    else:
+        print(f"Erreur: {error}")
+
+# ============= LANCEMENT DU BOT =============
+if __name__ == "__main__":
+    keep_alive()
+    TOKEN = os.getenv('DISCORD_TOKEN')
+    
+    if not TOKEN:
+        print("❌ ERREUR: Token Discord manquant!")
+        print("Ajoutez votre token dans les variables d'environnement de Render:")
+        print("DISCORD_TOKEN = votre_token_ici")
+    else:
+        try:
+            bot.run(TOKEN)
+        except Exception as e:
+            print(f"❌ Erreur de connexion: {e}")
