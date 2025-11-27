@@ -298,7 +298,7 @@ async def log_action(guild, log_type, message):
     channel = bot.get_channel(log_channel_id)
     if channel:
         embed = discord.Embed(description=message, color=discord.Color.blue(), timestamp=datetime.now())
-        await channel.send(embed=embed)import disnake as discord
+        await channel.send(embed=embed)
 from disnake.ext import commands, tasks
 from disnake.ui import Button, View, Select
 import asyncio
