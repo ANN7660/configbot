@@ -1,3 +1,5 @@
+
+# Hoshikuzu.py - Cleaned and corrected bot (Disnake) with 2-page !config and full !help
 import os
 import asyncio
 import random
@@ -814,3 +816,274 @@ if __name__ == "__main__":
         print("❌ Token invalide")
     except Exception as e:
         print("❌ Erreur:", e)
+
+
+# -------------------------
+# Interactive Embed Editor
+# Multi-page editor for !bvnembed and !leaveembed (uses Modals + Buttons + Selects)
+# -------------------------
+from disnake.ui import Modal, TextInput
+from typing import Dict, Any, Tuple
+
+# Temporary in-memory editor states: {(guild_id, user_id, mode): state_dict}
+embed_editors: Dict[Tuple[int,int,str], Dict[str, Any]] = {}
+
+def _default_editor_state(mode: str):
+    # mode is 'welcome' or 'leave'
+    return {
+        "mode": mode,
+        "title": "Bienvenue!" if mode=="welcome" else "Au revoir!",
+        "description": "",
+        "color": "blue",
+        "thumbnail": "member",  # 'member' | 'server' | url | None
+        "image": None,
+        "footer": "",
+    }
+
+def build_preview_embed(state: Dict[str, Any], guild: discord.Guild, sample_user: discord.Member):
+    title = state.get("title") or ""
+    desc = state.get("description") or ""
+    color_name = state.get("color", "blue")
+    try:
+        color = getattr(discord.Color, color_name)()
+    except Exception:
+        color = discord.Color.blue()
+    embed = discord.Embed(title=title, description=desc, color=color)
+    thumb = state.get("thumbnail")
+    if thumb == "member" and sample_user:
+        embed.set_thumbnail(url=sample_user.display_avatar.url)
+    elif thumb == "server" and guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    elif thumb:
+        embed.set_thumbnail(url=thumb)
+    if state.get("image"):
+        embed.set_image(url=state.get("image"))
+    if state.get("footer"):
+        embed.set_footer(text=state.get("footer"))
+    return embed
+
+# Generic Modal to edit a single text field
+class SingleFieldModal(Modal):
+    def __init__(self, title:str, field_name:str, placeholder:str, max_length:int, state_key:str, editor_key: Tuple[int,int,str]):
+        self.field_name = field_name
+        self.state_key = state_key
+        self.editor_key = editor_key
+        components = [TextInput(label=field_name, placeholder=placeholder, style=TextInput.paragraph if max_length>100 else TextInput.short, min_length=0, max_length=max_length, custom_id=state_key)]
+        super().__init__(title=title, components=components)
+
+    async def callback(self, interaction: discord.Interaction):
+        guild_id, user_id, mode = self.editor_key
+        key = (guild_id, user_id, mode)
+        state = embed_editors.get(key)
+        if not state:
+            await interaction.response.send_message("Éditeur introuvable (expiré). Relance la commande.", ephemeral=True)
+            return
+        value = self.children[0].value
+        state[self.state_key] = value
+        # update preview message if exist
+        msg = state.get("message")
+        guild = bot.get_guild(guild_id)
+        user = guild.get_member(user_id) if guild else None
+        preview = build_preview_embed(state, guild, user)
+        view = build_editor_view(guild_id, user_id, mode)
+        try:
+            await msg.edit(embed=preview, view=view)
+            await interaction.response.send_message("✅ Modifié.", ephemeral=True)
+        except Exception:
+            await interaction.response.send_message("✅ Modifié (aperçu non mis à jour).", ephemeral=True)
+
+# Helpers to build views per page
+def build_editor_view(guild_id:int, user_id:int, mode:str, page:int=1):
+    key = (guild_id, user_id, mode)
+    state = embed_editors.get(key, _default_editor_state(mode))
+    view = View(timeout=600)
+    # Page navigation handled by callbacks; add buttons according to page
+    # Common action buttons (page-specific)
+    if page == 1:
+        # Text settings
+        btn_title = Button(label="Titre", style=discord.ButtonStyle.primary)
+        btn_desc = Button(label="Description", style=discord.ButtonStyle.primary)
+        async def title_cb(i: discord.Interaction):
+            modal = SingleFieldModal(title="Modifier le titre", field_name="Titre", placeholder="Titre de l'embed", max_length=256, state_key="title", editor_key=key)
+            await i.response.send_modal(modal)
+        async def desc_cb(i: discord.Interaction):
+            modal = SingleFieldModal(title="Modifier la description", field_name="Description", placeholder="Texte de description (utilise \\n pour saut)", max_length=2000, state_key="description", editor_key=key)
+            await i.response.send_modal(modal)
+        btn_title.callback = title_cb
+        btn_desc.callback = desc_cb
+        view.add_item(btn_title)
+        view.add_item(btn_desc)
+        # Next button
+        btn_next = Button(label="▶ Page suivante", style=discord.ButtonStyle.secondary)
+        async def next_cb(i: discord.Interaction):
+            await show_editor_page(i, guild_id, user_id, mode, 2)
+        btn_next.callback = next_cb
+        view.add_item(btn_next)
+    elif page == 2:
+        # Visual settings
+        # Color select
+        color_select = Select(
+            placeholder="Couleur",
+            options=[
+                discord.SelectOption(label="Bleu", value="blue"),
+                discord.SelectOption(label="Vert", value="green"),
+                discord.SelectOption(label="Rouge", value="red"),
+                discord.SelectOption(label="Or", value="gold"),
+                discord.SelectOption(label="Gris", value="greyple"),
+                discord.SelectOption(label="Noir", value="dark"),
+                discord.SelectOption(label="Personnalisée (hex)", value="custom")
+            ]
+        )
+        async def color_cb(i: discord.Interaction):
+            sel = i.data.get("values", [])[0]
+            if sel == "custom":
+                modal = SingleFieldModal(title="Couleur hex", field_name="Hex couleur", placeholder="#FF00FF ou FF00FF", max_length=7, state_key="color", editor_key=key)
+                await i.response.send_modal(modal)
+            else:
+                state = embed_editors.get(key)
+                if state is not None:
+                    state["color"] = sel
+                # update preview
+                msg = state.get("message")
+                guild = bot.get_guild(guild_id)
+                user = guild.get_member(user_id) if guild else None
+                preview = build_preview_embed(state, guild, user)
+                view = build_editor_view(guild_id, user_id, mode, page=2)
+                try:
+                    await msg.edit(embed=preview, view=view)
+                    await i.response.send_message("✅ Couleur mise à jour.", ephemeral=True)
+                except Exception:
+                    await i.response.send_message("✅ Couleur mise à jour.", ephemeral=True)
+        color_select.callback = color_cb
+        view.add_item(color_select)
+        # Thumbnail choice buttons
+        btn_thumb_member = Button(label="Thumbnail: Membre", style=discord.ButtonStyle.secondary)
+        btn_thumb_server = Button(label="Thumbnail: Serveur", style=discord.ButtonStyle.secondary)
+        btn_thumb_url = Button(label="Thumbnail: URL", style=discord.ButtonStyle.secondary)
+        async def thumb_member_cb(i: discord.Interaction):
+            state = embed_editors.get(key)
+            state["thumbnail"] = "member"
+            msg = state.get("message"); guild = bot.get_guild(guild_id); user = guild.get_member(user_id) if guild else None
+            await msg.edit(embed=build_preview_embed(state, guild, user), view=build_editor_view(guild_id,user_id,mode,2))
+            await i.response.send_message("✅ Thumbnail réglé sur membre.", ephemeral=True)
+        async def thumb_server_cb(i: discord.Interaction):
+            state = embed_editors.get(key)
+            state["thumbnail"] = "server"
+            msg = state.get("message"); guild = bot.get_guild(guild_id); user = guild.get_member(user_id) if guild else None
+            await msg.edit(embed=build_preview_embed(state, guild, user), view=build_editor_view(guild_id,user_id,mode,2))
+            await i.response.send_message("✅ Thumbnail réglé sur serveur.", ephemeral=True)
+        async def thumb_url_cb(i: discord.Interaction):
+            modal = SingleFieldModal(title="Thumbnail URL", field_name="Thumbnail URL", placeholder="https://....", max_length=300, state_key="thumbnail", editor_key=key)
+            await i.response.send_modal(modal)
+        btn_thumb_member.callback = thumb_member_cb
+        btn_thumb_server.callback = thumb_server_cb
+        btn_thumb_url.callback = thumb_url_cb
+        view.add_item(btn_thumb_member)
+        view.add_item(btn_thumb_server)
+        view.add_item(btn_thumb_url)
+        # Image URL modal
+        btn_image = Button(label="Image (URL)", style=discord.ButtonStyle.primary)
+        async def image_cb(i: discord.Interaction):
+            modal = SingleFieldModal(title="Image URL", field_name="Image URL", placeholder="https://....", max_length=300, state_key="image", editor_key=key)
+            await i.response.send_modal(modal)
+        btn_image.callback = image_cb
+        view.add_item(btn_image)
+        # Navigation
+        btn_back = Button(label="◀ Page précédente", style=discord.ButtonStyle.secondary)
+        btn_next = Button(label="▶ Page suivante", style=discord.ButtonStyle.secondary)
+        async def back_cb(i: discord.Interaction):
+            await show_editor_page(i, guild_id, user_id, mode, 1)
+        async def next_cb(i: discord.Interaction):
+            await show_editor_page(i, guild_id, user_id, mode, 3)
+        btn_back.callback = back_cb
+        btn_next.callback = next_cb
+        view.add_item(btn_back)
+        view.add_item(btn_next)
+    elif page == 3:
+        # Footer and save
+        btn_footer = Button(label="Footer", style=discord.ButtonStyle.primary)
+        btn_preview = Button(label="Aperçu complet", style=discord.ButtonStyle.secondary)
+        btn_save = Button(label="💾 Sauvegarder", style=discord.ButtonStyle.success)
+        async def footer_cb(i: discord.Interaction):
+            modal = SingleFieldModal(title="Footer", field_name="Footer", placeholder="Texte du footer", max_length=2048, state_key="footer", editor_key=key)
+            await i.response.send_modal(modal)
+        async def preview_cb(i: discord.Interaction):
+            state = embed_editors.get(key)
+            guild = bot.get_guild(guild_id); user = guild.get_member(user_id) if guild else None
+            await i.response.send_message(embed=build_preview_embed(state, guild, user), ephemeral=True)
+        async def save_cb(i: discord.Interaction):
+            # persist to server_config
+            state = embed_editors.get(key)
+            if not state:
+                await i.response.send_message("Éditeur expiré.", ephemeral=True); return
+            mode_local = state.get("mode")
+            if mode_local == "welcome":
+                server_config[guild_id]["welcome_embed"] = {
+                    "title": state.get("title"), "description": state.get("description"),
+                    "color": state.get("color"), "thumbnail": state.get("thumbnail"),
+                    "image": state.get("image"), "footer": state.get("footer")
+                }
+                server_config[guild_id]["welcome_text"] = None
+            else:
+                server_config[guild_id]["leave_embed"] = {
+                    "title": state.get("title"), "description": state.get("description"),
+                    "color": state.get("color"), "thumbnail": state.get("thumbnail"),
+                    "image": state.get("image"), "footer": state.get("footer")
+                }
+                server_config[guild_id]["leave_text"] = None
+            await i.response.send_message("✅ Embed sauvegardé en mémoire.", ephemeral=True)
+        btn_footer.callback = footer_cb
+        btn_preview.callback = preview_cb
+        btn_save.callback = save_cb
+        view.add_item(btn_footer)
+        view.add_item(btn_preview)
+        view.add_item(btn_save)
+        btn_back = Button(label="◀ Page précédente", style=discord.ButtonStyle.secondary)
+        async def back_cb(i: discord.Interaction):
+            await show_editor_page(i, guild_id, user_id, mode, 2)
+        btn_back.callback = back_cb
+        view.add_item(btn_back)
+    return view
+
+async def show_editor_page(interaction: discord.Interaction, guild_id:int, user_id:int, mode:str, page:int):
+    key = (guild_id, user_id, mode)
+    state = embed_editors.get(key)
+    if not state:
+        # initialize
+        state = _default_editor_state(mode)
+        embed_editors[key] = state
+    guild = bot.get_guild(guild_id)
+    user = guild.get_member(user_id) if guild else None
+    preview = build_preview_embed(state, guild, user)
+    # create view for page
+    view = build_editor_view(guild_id, user_id, mode, page=page)
+    state["message"] = state.get("message") or interaction.message
+    try:
+        await interaction.response.edit_message(embed=preview, view=view)
+    except Exception:
+        await interaction.response.send_message(embed=preview, view=view, ephemeral=True)
+
+# Commands to open the editor
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def bvnembed(ctx):
+    key = (ctx.guild.id, ctx.author.id, "welcome")
+    embed_editors[key] = _default_editor_state("welcome")
+    guild = ctx.guild
+    user = ctx.author
+    preview = build_preview_embed(embed_editors[key], guild, user)
+    view = build_editor_view(ctx.guild.id, ctx.author.id, "welcome", page=1)
+    msg = await ctx.send("🎨 Éditeur d'embed de bienvenue — Utilisateur: " + ctx.author.mention, embed=preview, view=view)
+    embed_editors[key]["message"] = msg
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def leaveembed(ctx):
+    key = (ctx.guild.id, ctx.author.id, "leave")
+    embed_editors[key] = _default_editor_state("leave")
+    guild = ctx.guild
+    user = ctx.author
+    preview = build_preview_embed(embed_editors[key], guild, user)
+    view = build_editor_view(ctx.guild.id, ctx.author.id, "leave", page=1)
+    msg = await ctx.send("🎨 Éditeur d'embed de départ — Utilisateur: " + ctx.author.mention, embed=preview, view=view)
+    embed_editors[key]["message"] = msg
