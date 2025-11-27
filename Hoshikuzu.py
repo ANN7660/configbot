@@ -550,7 +550,10 @@ async def config(ctx):
     
     await ctx.send(embed=embed, view=view)
 
-# Continue dans partie 2...
+# ============= PARTIE 2/3: COMMANDES =============
+# ⚠️ IMPORTANT: Colle cette partie APRÈS la Partie 1
+# Ne copie PAS deux fois les mêmes commandes !
+
 # ============= MODÉRATION =============
 @bot.command()
 @commands.has_permissions(kick_members=True)
