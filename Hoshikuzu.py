@@ -314,7 +314,7 @@ async def log_action(guild, log_type, message):
         embed = discord.Embed(description=message, color=discord.Color.blue(), timestamp=datetime.now())
         await channel.send(embed=embed)
 
-# ============= HELP COMMAND =============
+# ============= HELP & CONFIG =============
 @bot.command()
 async def help(ctx):
     embed = discord.Embed(
@@ -439,7 +439,6 @@ async def help(ctx):
     
     await ctx.send(embed=embed, view=view)
 
-# ============= CONFIG COMMAND =============
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def config(ctx):
@@ -549,362 +548,7 @@ async def config(ctx):
     view.add_item(btn_save)
     
     await ctx.send(embed=embed, view=view)
-
-# ============= PARTIE 2/3: COMMANDES =============
-# ⚠️ IMPORTANT: Colle cette partie APRÈS la Partie 1
-# Ne copie PAS deux fois les mêmes commandes !
-
-# ============= MODÉRATION =============
-@bot.command()
-@commands.has_permissions(kick_members=True)
-async def kick(ctx, member: discord.Member, *, reason="Aucune raison"):
-    await member.kick(reason=reason)
-    await ctx.send(f"✅ {member.mention} a été expulsé! Raison: {reason}")
-    await log_action(ctx.guild, "modération", f"👢 {member.mention} expulsé par {ctx.author.mention} - Raison: {reason}")
-
-@bot.command()
-@commands.has_permissions(ban_members=True)
-async def ban(ctx, member: discord.Member, *, reason="Aucune raison"):
-    await member.ban(reason=reason)
-    await ctx.send(f"✅ {member.mention} a été banni! Raison: {reason}")
-    await log_action(ctx.guild, "modération", f"🔨 {member.mention} banni par {ctx.author.mention} - Raison: {reason}")
-
-@bot.command()
-@commands.has_permissions(ban_members=True)
-async def unban(ctx, user_id: int):
-    user = await bot.fetch_user(user_id)
-    await ctx.guild.unban(user)
-    await ctx.send(f"✅ {user.mention} a été débanni!")
-    await log_action(ctx.guild, "modération", f"✅ {user.mention} débanni par {ctx.author.mention}")
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def mute(ctx, member: discord.Member, duration: str, *, reason="Aucune raison"):
-    mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
-    
-    if not mute_role:
-        mute_role = await ctx.guild.create_role(name="Muted", reason="Rôle de mute automatique")
-        for channel in ctx.guild.channels:
-            await channel.set_permissions(mute_role, speak=False, send_messages=False)
-    
-    await member.add_roles(mute_role, reason=reason)
-    await ctx.send(f"🔇 {member.mention} a été mute pour {duration}! Raison: {reason}")
-    await log_action(ctx.guild, "modération", f"🔇 {member.mention} mute par {ctx.author.mention} ({duration}) - Raison: {reason}")
-    
-    # Conversion de durée
-    time_convert = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    amount = int(duration[:-1])
-    unit = duration[-1]
-    
-    if unit not in time_convert:
-        await ctx.send("❌ Durée invalide! Utilise: 10s, 5m, 1h, 1d")
-        return
-    
-    sleep_time = amount * time_convert[unit]
-    
-    await asyncio.sleep(sleep_time)
-    await member.remove_roles(mute_role)
-    await ctx.send(f"🔊 {member.mention} a été unmute automatiquement!")
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def unmute(ctx, member: discord.Member):
-    mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
-    
-    if mute_role in member.roles:
-        await member.remove_roles(mute_role)
-        await ctx.send(f"🔊 {member.mention} a été unmute!")
-        await log_action(ctx.guild, "modération", f"🔊 {member.mention} unmute par {ctx.author.mention}")
-    else:
-        await ctx.send(f"❌ {member.mention} n'est pas mute!")
-
-@bot.command()
-@commands.has_permissions(manage_messages=True)
-async def clear(ctx, amount: int):
-    if amount < 1 or amount > 100:
-        await ctx.send("❌ Nombre invalide! (1-100)")
-        return
-    
-    await ctx.channel.purge(limit=amount + 1)
-    msg = await ctx.send(f"✅ {amount} messages supprimés!")
-    await asyncio.sleep(3)
-    await msg.delete()
-    await log_action(ctx.guild, "modération", f"🗑️ {amount} messages supprimés dans {ctx.channel.mention} par {ctx.author.mention}")
-
-@bot.command()
-@commands.has_permissions(manage_channels=True)
-async def lock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send("🔒 Salon verrouillé!")
-    await log_action(ctx.guild, "modération", f"🔒 {ctx.channel.mention} verrouillé par {ctx.author.mention}")
-
-@bot.command()
-@commands.has_permissions(manage_channels=True)
-async def unlock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send("🔓 Salon déverrouillé!")
-    await log_action(ctx.guild, "modération", f"🔓 {ctx.channel.mention} déverrouillé par {ctx.author.mention}")
-
-@bot.command()
-@commands.has_permissions(kick_members=True)
-async def warn(ctx, member: discord.Member, *, reason="Aucune raison"):
-    warnings_data[member.id].append({
-        "reason": reason,
-        "moderator": ctx.author.id,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M")
-    })
-    
-    warn_count = len(warnings_data[member.id])
-    
-    await ctx.send(f"⚠️ {member.mention} a été averti! ({warn_count} avertissements)\nRaison: {reason}")
-    await log_action(ctx.guild, "modération", f"⚠️ {member.mention} averti par {ctx.author.mention} - Raison: {reason}")
-    
-    # Auto-sanctions
-    if warn_count == 3:
-        await ctx.send(f"🔇 {member.mention} a reçu un mute automatique (3 warns)!")
-        mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
-        if mute_role:
-            await member.add_roles(mute_role)
-    elif warn_count == 5:
-        await ctx.send(f"👢 {member.mention} a été kick automatiquement (5 warns)!")
-        await member.kick(reason="5 avertissements")
-
-@bot.command()
-async def warnings(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    warns = warnings_data.get(member.id, [])
-    
-    if not warns:
-        await ctx.send(f"✅ {member.mention} n'a aucun avertissement!")
-        return
-    
-    embed = discord.Embed(
-        title=f"⚠️ Avertissements de {member.name}",
-        color=discord.Color.orange()
-    )
-    
-    for i, warn in enumerate(warns, 1):
-        mod = ctx.guild.get_member(warn["moderator"])
-        mod_name = mod.name if mod else "Inconnu"
-        embed.add_field(
-            name=f"Warn #{i}",
-            value=f"**Raison:** {warn['reason']}\n**Par:** {mod_name}\n**Date:** {warn['time']}",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
-
-# ============= ÉCONOMIE =============
-@bot.command()
-async def daily(ctx):
-    user_key = f"{ctx.guild.id}_{ctx.author.id}"
-    user = economy_data[user_key]
-    
-    now = datetime.now()
-    if user["daily_claimed"]:
-        last_claim = datetime.fromisoformat(user["daily_claimed"])
-        if (now - last_claim).total_seconds() < 86400:
-            time_left = timedelta(seconds=86400 - (now - last_claim).total_seconds())
-            hours, remainder = divmod(time_left.seconds, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            await ctx.send(f"⏰ Reviens dans {hours}h {minutes}m {seconds}s pour ta récompense journalière!")
-            return
-    
-    amount = random.randint(500, 1000)
-    user["money"] += amount
-    user["daily_claimed"] = now.isoformat()
-    
-    await ctx.send(f"💰 {ctx.author.mention} a reçu **{amount}$** de récompense journalière!")
-
-@bot.command()
-async def balance(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    user_key = f"{ctx.guild.id}_{member.id}"
-    user = economy_data[user_key]
-    
-    embed = discord.Embed(
-        title=f"💰 Argent de {member.name}",
-        color=discord.Color.gold()
-    )
-    embed.add_field(name="💵 Argent liquide", value=f"{user['money']}$", inline=True)
-    embed.add_field(name="🏦 Banque", value=f"{user['bank']}$", inline=True)
-    embed.add_field(name="⭐ Réputation", value=f"{user['rep']}", inline=True)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def rep(ctx, member: discord.Member):
-    if member == ctx.author:
-        await ctx.send("❌ Tu ne peux pas te donner de la réputation!")
-        return
-    
-    user_key = f"{ctx.guild.id}_{member.id}"
-    economy_data[user_key]["rep"] += 1
-    
-    await ctx.send(f"⭐ {ctx.author.mention} a donné de la réputation à {member.mention}!")
-
-@bot.command()
-async def work(ctx):
-    user_key = f"{ctx.guild.id}_{ctx.author.id}"
-    user = economy_data[user_key]
-    
-    now = datetime.now()
-    if user["work_claimed"]:
-        last_claim = datetime.fromisoformat(user["work_claimed"])
-        if (now - last_claim).total_seconds() < 3600:
-            time_left = timedelta(seconds=3600 - (now - last_claim).total_seconds())
-            minutes, seconds = divmod(time_left.seconds, 60)
-            await ctx.send(f"⏰ Tu es fatigué! Reviens dans {minutes}m {seconds}s!")
-            return
-    
-    jobs = [
-        ("développeur", 200, 400),
-        ("streamer", 150, 350),
-        ("livreur", 100, 250),
-        ("serveur", 80, 200),
-        ("jardinier", 50, 150)
-    ]
-    
-    job, min_pay, max_pay = random.choice(jobs)
-    amount = random.randint(min_pay, max_pay)
-    user["money"] += amount
-    user["work_claimed"] = now.isoformat()
-    
-    await ctx.send(f"💼 {ctx.author.mention} a travaillé comme **{job}** et a gagné **{amount}$**!")
-
-@bot.command()
-async def beg(ctx):
-    user_key = f"{ctx.guild.id}_{ctx.author.id}"
-    
-    if random.random() < 0.5:
-        amount = random.randint(10, 50)
-        economy_data[user_key]["money"] += amount
-        await ctx.send(f"🙏 Quelqu'un t'a donné **{amount}$**!")
-    else:
-        await ctx.send("❌ Personne ne t'a donné d'argent...")
-
-@bot.command()
-async def pay(ctx, member: discord.Member, amount: int):
-    if amount <= 0:
-        await ctx.send("❌ Montant invalide!")
-        return
-    
-    sender_key = f"{ctx.guild.id}_{ctx.author.id}"
-    receiver_key = f"{ctx.guild.id}_{member.id}"
-    
-    if economy_data[sender_key]["money"] < amount:
-        await ctx.send("❌ Tu n'as pas assez d'argent!")
-        return
-    
-    economy_data[sender_key]["money"] -= amount
-    economy_data[receiver_key]["money"] += amount
-    
-    await ctx.send(f"💸 {ctx.author.mention} a payé **{amount}$** à {member.mention}!")
-
-@bot.command()
-async def rob(ctx, member: discord.Member):
-    if member == ctx.author:
-        await ctx.send("❌ Tu ne peux pas te voler toi-même!")
-        return
-    
-    robber_key = f"{ctx.guild.id}_{ctx.author.id}"
-    victim_key = f"{ctx.guild.id}_{member.id}"
-    
-    victim_money = economy_data[victim_key]["money"]
-    
-    if victim_money < 100:
-        await ctx.send(f"❌ {member.mention} n'a pas assez d'argent à voler!")
-        return
-    
-    if random.random() < 0.5:
-        amount = random.randint(50, min(victim_money, 500))
-        economy_data[robber_key]["money"] += amount
-        economy_data[victim_key]["money"] -= amount
-        await ctx.send(f"💰 {ctx.author.mention} a volé **{amount}$** à {member.mention}!")
-    else:
-        fine = random.randint(100, 300)
-        economy_data[robber_key]["money"] = max(0, economy_data[robber_key]["money"] - fine)
-        await ctx.send(f"🚔 {ctx.author.mention} s'est fait attraper! Amende: **{fine}$**")
-
-# ============= FUN & JEUX =============
-@bot.command(name="8ball")
-async def eight_ball(ctx, *, question):
-    responses = [
-        "✅ Oui, absolument!",
-        "✅ C'est certain!",
-        "✅ Sans aucun doute!",
-        "🤔 Probablement...",
-        "🤔 Peut-être...",
-        "❌ Je ne pense pas...",
-        "❌ Non, définitivement pas!",
-        "❌ Très peu probable..."
-    ]
-    
-    await ctx.send(f"🎱 Question: {question}\n💬 Réponse: {random.choice(responses)}")
-
-@bot.command()
-async def joke(ctx):
-    jokes = [
-        "Pourquoi les plongeurs plongent-ils toujours en arrière et jamais en avant ? Parce que sinon ils tombent dans le bateau ! 😂",
-        "Qu'est-ce qu'un crocodile qui surveille une maison ? Un Lacoste garde ! 🐊",
-        "Comment appelle-t-on un chat tombé dans un pot de peinture le jour de Noël ? Un chat-peint de Noël ! 🎅",
-        "Qu'est-ce qu'un cannibale ? Quelqu'un qui en a marre de la salade ! 😱"
-    ]
-    
-    await ctx.send(random.choice(jokes))
-
-@bot.command()
-async def coinflip(ctx):
-    result = random.choice(["Pile", "Face"])
-    await ctx.send(f"🪙 {result}!")
-
-@bot.command()
-async def dice(ctx, bet: int = 0):
-    user_key = f"{ctx.guild.id}_{ctx.author.id}"
-    dice_result = random.randint(1, 6)
-    
-    if bet > 0:
-        if economy_data[user_key]["money"] < bet:
-            await ctx.send("❌ Tu n'as pas assez d'argent!")
-            return
-        
-        if dice_result >= 4:
-            economy_data[user_key]["money"] += bet
-            await ctx.send(f"🎲 Tu as fait **{dice_result}**! Tu gagnes **{bet}$**! 💰")
-        else:
-            economy_data[user_key]["money"] -= bet
-            await ctx.send(f"🎲 Tu as fait **{dice_result}**! Tu perds **{bet}$**! 😢")
-    else:
-        await ctx.send(f"🎲 Tu as fait **{dice_result}**!")
-
-@bot.command()
-async def rps(ctx, choice: str):
-    choices = ["pierre", "papier", "ciseaux"]
-    choice = choice.lower()
-    
-    if choice not in choices:
-        await ctx.send("❌ Choix invalide! (pierre/papier/ciseaux)")
-        return
-    
-    bot_choice = random.choice(choices)
-    
-    emojis = {"pierre": "🪨", "papier": "📄", "ciseaux": "✂️"}
-    
-    result = ""
-    if choice == bot_choice:
-        result = "🤝 Égalité!"
-    elif (choice == "pierre" and bot_choice == "ciseaux") or \
-         (choice == "papier" and bot_choice == "pierre") or \
-         (choice == "ciseaux" and bot_choice == "papier"):
-        result = "🎉 Tu gagnes!"
-    else:
-        result = "😢 Tu perds!"
-    
-    await ctx.send(f"{emojis[choice]} vs {emojis[bot_choice]}\n{result}")
-
-# Continue dans partie 3...
-# ============= MODÉRATION =============
+    # ============= MODÉRATION =============
 @bot.command()
 @commands.has_permissions(kick_members=True)
 async def kick(ctx, member: discord.Member, *, reason="Aucune raison"):
@@ -1457,8 +1101,7 @@ async def leaderboard(ctx, category: str = "messages"):
             embed.add_field(name=f"{medal} {member.name}", value=value, inline=False)
     
     await ctx.send(embed=embed)
-
-# ============= BIENVENUE/DÉPART =============
+    # ============= BIENVENUE/DÉPART =============
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def bvntext(ctx, *, message):
@@ -1725,11 +1368,21 @@ async def antispam(ctx, status: str):
 if __name__ == "__main__":
     keep_alive()
     
-    # Remplace "TON_TOKEN" par ton vrai token Discord
-    TOKEN = os.environ.get("DISCORD_TOKEN") or "TON_TOKEN"
+    # Récupération du token depuis les variables d'environnement
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    
+    if not TOKEN:
+        print("❌ ERREUR: Variable d'environnement DISCORD_TOKEN manquante!")
+        print("📝 Sur Render.com, ajoute ta variable d'environnement:")
+        print("   Clé: DISCORD_TOKEN")
+        print("   Valeur: ton_token_discord")
+        exit(1)
     
     try:
+        print("🚀 Démarrage du bot...")
         bot.run(TOKEN)
+    except discord.LoginFailure:
+        print("❌ ERREUR: Token Discord invalide!")
+        print("Vérifie que ton token est correct dans les variables d'environnement.")
     except Exception as e:
         print(f"❌ Erreur de connexion: {e}")
-        print("Vérifie que ton token est correct!")
