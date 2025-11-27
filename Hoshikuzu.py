@@ -1,5 +1,3 @@
-
-# Hoshikuzu.py - Cleaned and corrected bot (Disnake) with 2-page !config
 import os
 import asyncio
 import random
@@ -300,9 +298,123 @@ async def on_voice_state_update(member, before, after):
 # Commands: help and config (two pages with prev/next)
 @bot.command()
 async def help(ctx):
-    embed = discord.Embed(title="🛡️ Commandes", description="Utilise le menu pour voir les catégories", color=discord.Color.blue())
-    embed.add_field(name="Prefix", value="`!`", inline=False)
-    await ctx.send(embed=embed)
+    # ==== EMBED PRINCIPAL ====
+    embed = discord.Embed(
+        title="🛠️ Menu d’aide",
+        description="Sélectionne une catégorie ci-dessous pour afficher les commandes.",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Préfix :", value="`!`", inline=False)
+
+    # ==== DICTIONNAIRE DES CATÉGORIES ====
+    categories = {
+        "moderation": (
+            "🛡️ Modération",
+            [
+                ("!kick <@membre> [raison]", "Expulse un membre."),
+                ("!ban <@membre> [raison]", "Bannit un membre."),
+                ("!unban <ID>", "Débannit un utilisateur."),
+                ("!mute <@membre> <durée>", "Mute temporairement."),
+                ("!unmute <@membre>", "Retire le mute."),
+                ("!clear <nombre>", "Supprime des messages."),
+                ("!lock / !unlock", "Verrouille le salon."),
+                ("!warn <@membre>", "Avertir un membre."),
+                ("!warnings [membre]", "Voir les avertissements.")
+            ]
+        ),
+        "economy": (
+            "💰 Économie",
+            [
+                ("!daily", "Récompense journalière."),
+                ("!balance", "Voir ton argent."),
+                ("!rep <membre>", "Donner de la réputation."),
+                ("!work", "Gagner de l’argent."),
+                ("!beg", "Mendier."),
+                ("!pay <membre> <montant>", "Payer quelqu’un."),
+                ("!rob <membre>", "Tenter de voler.")
+            ]
+        ),
+        "fun": (
+            "🎮 Fun",
+            [
+                ("!8ball <question>", "Pose une question."),
+                ("!joke", "Raconte une blague."),
+                ("!coinflip", "Pile ou face."),
+                ("!dice", "Lancer un dé."),
+                ("!rps <pierre/papier/ciseaux>", "Jeu du chifoumi.")
+            ]
+        ),
+        "utility": (
+            "🔧 Utilitaires",
+            [
+                ("!userinfo [membre]", "Voir les infos d’un utilisateur."),
+                ("!serverinfo", "Infos serveur."),
+                ("!avatar [membre]", "Voir un avatar."),
+                ("!poll <question> | <opt1> | <opt2>", "Créer un sondage."),
+                ("!remind <durée> <texte>", "Créer un rappel."),
+                ("!stats", "Voir tes stats."),
+                ("!leaderboard", "Classement.")
+            ]
+        ),
+        "welcome": (
+            "👋 Bienvenue / Départ",
+            [
+                ("!bvntext <message>", "Configurer le message de bienvenue."),
+                ("!bvnembed", "Configurer l’embed de bienvenue."),
+                ("!leavetext <message>", "Configurer le message de départ."),
+                ("!leaveembed", "Configurer l’embed de départ."),
+                ("!setwelcome <#salon>", "Définir le salon de bienvenue."),
+                ("!setleave <#salon>", "Définir le salon de départ.")
+            ]
+        ),
+        "systems": (
+            "⚙️ Systèmes & Config",
+            [
+                ("!config", "Configurer le bot."),
+                ("!ticketsetup", "Configurer les tickets."),
+                ("!tempvoc <salon>", "Vocaux temporaires."),
+                ("!giveaway <durée> <prix>", "Créer un giveaway."),
+                ("!setlog <type> <#salon>", "Configurer les logs."),
+                ("!autorole <@role>", "Rôle automatique."),
+                ("!antispam <on/off>", "Activer l’antispam.")
+            ]
+        )
+    }
+
+    # ==== MENU DÉROULANT ====
+    select = Select(
+        placeholder="Choisis une catégorie",
+        options=[
+            discord.SelectOption(label="Modération", emoji="🛡️", value="moderation"),
+            discord.SelectOption(label="Économie", emoji="💰", value="economy"),
+            discord.SelectOption(label="Fun", emoji="🎮", value="fun"),
+            discord.SelectOption(label="Utilitaires", emoji="🔧", value="utility"),
+            discord.SelectOption(label="Bienvenue/Départ", emoji="👋", value="welcome"),
+            discord.SelectOption(label="Systèmes", emoji="⚙️", value="systems")
+        ]
+    )
+
+    async def select_callback(interaction: discord.Interaction):
+        value = select.values[0]
+        title, cmds = categories[value]
+
+        new_embed = discord.Embed(
+            title=title,
+            description="Voici les commandes disponibles :",
+            color=discord.Color.blue()
+        )
+
+        for cmd, desc in cmds:
+            new_embed.add_field(name=cmd, value=desc, inline=False)
+
+        await interaction.response.edit_message(embed=new_embed, view=view)
+
+    select.callback = select_callback
+
+    view = View(timeout=180)
+    view.add_item(select)
+
+    await ctx.send(embed=embed, view=view)
 
 # Config command: 2 pages navigation with Prev / Next buttons
 @bot.command()
