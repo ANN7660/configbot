@@ -99,7 +99,8 @@ def get_gcfg(guild_id):
             "tempVocJoinChannel": None,
             "tempVocChannels": [],
             "roleReacts": {},  # message_id -> {roleId, emoji}
-            "statsChannels": []  # ids for stats voice channels
+            "statsChannels": [],  # ids for stats voice channels
+            "openTickets": {}  # channel_id -> {owner, created}
         }
         save_config(config)
     return config[gid]
@@ -168,7 +169,7 @@ class HelpSelect(Select):
             )
         elif val == "tickets":
             embed = Embed(title="🎫 Tickets", color=0x3498db)
-            embed.description = "**!ticketpanel** - créer panel\n**!ticketrole** @role - ajouter rôle ticket"
+            embed.description = "**!ticketpanel** - créer panel\n**!ticketrole** @role - ajouter rôle ticket\n**!ticketadmin** - panneau administrateur tickets"
         elif val == "moderation":
             embed = Embed(title="🛡️ Modération", color=0xe74c3c)
             embed.description = "**!ban** `@user [raison]`\n**!unban** `<id>`\n**!mute** `@user <durée> [raison]`\n**!unmute** `@user`"
@@ -200,8 +201,10 @@ class TicketView(View):
         super().__init__(timeout=None)
         # We rely on the decorator-defined button below (avoid duplicate add_item)
 
+    # Note: callback signature is (self, interaction) for @discord.ui.button
     @discord.ui.button(label="📩 Créer un Ticket", style=ButtonStyle.primary, custom_id="create_ticket")
-    async def create_ticket(self, button: Button, interaction: discord.Interaction):
+    async def create_ticket(self, interaction: discord.Interaction):
+        # interaction param is the Interaction
         gcfg = get_gcfg(interaction.guild.id)
         # Check existing ticket by name
         existing = discord.utils.get(interaction.guild.text_channels, name=f"ticket-{interaction.user.name.lower()}")
@@ -227,17 +230,26 @@ class TicketView(View):
                 if role:
                     await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
 
+            # store open ticket
+            gcfg.setdefault("openTickets", {})[str(channel.id)] = {
+                "owner": str(interaction.user.id),
+                "created": int(datetime.utcnow().timestamp())
+            }
+            save_config(config)
+
             embed = Embed(title="🎫 Nouveau Ticket", description=f"Bonjour {interaction.user.mention}, décris ton problème.", color=0x3498db)
             close_view = View(timeout=None)
+            # closing button triggers on_interaction (custom_id pattern)
             close_view.add_item(Button(label="🔒 Fermer le Ticket", custom_id=f"close_ticket_{channel.id}", style=ButtonStyle.danger))
             mentions = interaction.user.mention + (" " + " ".join(f"<@&{r}>" for r in gcfg.get("ticketRoles", [])) if gcfg.get("ticketRoles") else "")
             await channel.send(content=mentions, embed=embed, view=close_view)
             await interaction.followup.send(f"✅ Ticket créé: {channel.mention}", ephemeral=True)
 
-            log = Embed(title="🎫 Ticket Créé", description=f"**Créé par:** {interaction.user} \n**Salon:** {channel.mention}", color=0x3498db, timestamp=datetime.utcnow())
+            log = Embed(title="🎫 Ticket Créé", description=f"**Salon:** {channel.mention}\n**Créé par:** {interaction.user} (`{interaction.user.id}`)\n**Heure:** <t:{int(datetime.utcnow().timestamp())}:F>", color=0x3498db, timestamp=datetime.utcnow())
             await send_log(interaction.guild, log)
-        except Exception:
+        except Exception as e:
             await interaction.followup.send("❌ Erreur lors de la création du ticket.", ephemeral=True)
+            print("create_ticket error:", e)
 
 # Close ticket buttons are handled in on_interaction
 @bot.event
@@ -245,26 +257,68 @@ async def on_interaction(interaction: discord.Interaction):
     # Only handle component interactions here
     if interaction.type != discord.InteractionType.component:
         return
-    cid = interaction.data.get("custom_id", "")
+    cid = interaction.data.get("custom_id", "") if interaction.data else ""
+    # User clicked the close ticket button inside the ticket channel
     if cid.startswith("close_ticket_"):
+        # Show confirmation view
         confirm = View(timeout=None)
         confirm.add_item(Button(label="✅ Confirmer", custom_id=f"confirm_close_{interaction.channel.id}", style=ButtonStyle.danger))
         confirm.add_item(Button(label="❌ Annuler", custom_id="cancel_close", style=ButtonStyle.secondary))
         await interaction.response.send_message(embed=Embed(title="❓ Confirmer la fermeture", description="Êtes-vous sûr de fermer ce ticket ?"), view=confirm, ephemeral=True)
         return
+
     if cid.startswith("confirm_close_"):
+        # Confirm close: gather info, log, delete channel and remove from openTickets
+        chan_id = cid.replace("confirm_close_", "")
+        # ensure the interaction channel is the ticket channel or admin triggered
+        target_channel = None
+        try:
+            if str(interaction.channel.id) == chan_id:
+                target_channel = interaction.channel
+            else:
+                # try fetch by id from guild
+                target_channel = interaction.guild.get_channel(int(chan_id))
+        except Exception:
+            target_channel = None
+        try:
+            # find owner info from config if present
+            gcfg = get_gcfg(interaction.guild.id)
+            ticket_entry = gcfg.get("openTickets", {}).get(str(chan_id))
+            owner_mention = "Inconnu"
+            owner_id = None
+            if ticket_entry:
+                owner_id = ticket_entry.get("owner")
+                try:
+                    owner_mention = f"<@{owner_id}>"
+                except Exception:
+                    owner_mention = "Inconnu"
+            # send log
+            log = Embed(title="🔒 Ticket Fermé", description=f"**Salon:** {target_channel.mention if target_channel else chan_id}\n**Fermé par:** {interaction.user} (`{interaction.user.id}`)\n**Créé par:** {owner_mention}\n**Heure:** <t:{int(datetime.utcnow().timestamp())}:F>", color=0xe74c3c, timestamp=datetime.utcnow())
+            await send_log(interaction.guild, log)
+        except Exception as e:
+            print("confirm_close logging error:", e)
+        # try to edit the ephemeral confirmation message to show closing
         try:
             await interaction.response.edit_message(content="🔒 Fermeture du ticket...", embed=None, view=None)
         except Exception:
             pass
+        # delete channel after short pause
         try:
-            log = Embed(title="🔒 Ticket Fermé", description=f"**Fermé par:** {interaction.user}\n**Salon:** {interaction.channel.name}", timestamp=datetime.utcnow(), color=0xe74c3c)
-            await send_log(interaction.guild, log)
             await asyncio.sleep(1.5)
-            await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
+            if target_channel:
+                await target_channel.delete(reason=f"Ticket fermé par {interaction.user}")
+            # remove from config
+            try:
+                gcfg = get_gcfg(interaction.guild.id)
+                if str(chan_id) in gcfg.get("openTickets", {}):
+                    del gcfg["openTickets"][str(chan_id)]
+                    save_config(config)
+            except Exception:
+                pass
         except Exception:
             pass
         return
+
     if cid == "cancel_close":
         try:
             await interaction.response.edit_message(content="✅ Fermeture annulée.", embed=None, view=None)
@@ -274,6 +328,124 @@ async def on_interaction(interaction: discord.Interaction):
             except Exception:
                 pass
         return
+
+    # Admin panel button handling (from AdminTicketView) - handled by view callbacks instead of here
+
+# === Admin ticket management view ===
+class AdminTicketView(View):
+    def __init__(self, gcfg, author_id):
+        super().__init__(timeout=120)
+        self.gcfg = gcfg
+        self.author_id = author_id
+        self.selected_channel: Optional[str] = None
+        # build select options from openTickets
+        options = []
+        for ch_id, info in (gcfg.get("openTickets") or {}).items():
+            owner_id = info.get("owner")
+            created_ts = info.get("created")
+            label = f"#{ch_id} - créé {datetime.utcfromtimestamp(created_ts).strftime('%Y-%m-%d %H:%M')}" if created_ts else f"#{ch_id}"
+            desc = f"Owner: <@{owner_id}>" if owner_id else "Owner: inconnu"
+            # make sure label not too long
+            options.append(SelectOption(label=label[:100], value=str(ch_id), description=desc[:100]))
+        if not options:
+            options = [SelectOption(label="Aucun ticket ouvert", value="none", description="Il n'y a pas de tickets ouverts.")]
+        self.select = Select(placeholder="Sélectionnez un ticket", min_values=1, max_values=1, options=options, custom_id="admin_ticket_select")
+        self.select.callback = self.select_callback
+        self.add_item(self.select)
+        # buttons
+        self.add_item(Button(label="❌ Fermer le Ticket Sélectionné", style=ButtonStyle.danger, custom_id="admin_close_selected"))
+        self.add_item(Button(label="🧹 Fermer Tous les Tickets", style=ButtonStyle.secondary, custom_id="admin_close_all"))
+        self.add_item(Button(label="🔄 Rafraîchir", style=ButtonStyle.primary, custom_id="admin_refresh"))
+
+    async def select_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Seul l'auteur peut utiliser ce panneau.", ephemeral=True)
+            return
+        self.selected_channel = self.select.values[0]
+        await interaction.response.send_message(f"✅ Ticket sélectionné: {self.selected_channel}", ephemeral=True)
+
+    @discord.ui.button(label="❌ Fermer le Ticket Sélectionné", style=ButtonStyle.danger, custom_id="admin_close_selected")
+    async def close_selected(self, button: Button, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Seul l'auteur peut utiliser ce panneau.", ephemeral=True)
+            return
+        if not self.selected_channel or self.selected_channel == "none":
+            await interaction.response.send_message("❌ Aucun ticket sélectionné.", ephemeral=True)
+            return
+        ch_id = self.selected_channel
+        ch = interaction.guild.get_channel(int(ch_id))
+        # log
+        gcfg = self.gcfg
+        ticket_entry = gcfg.get("openTickets", {}).get(str(ch_id))
+        owner_mention = f"<@{ticket_entry.get('owner')}>" if ticket_entry else "inconnu"
+        try:
+            log = Embed(title="🔒 Ticket Fermé (Admin)", description=f"**Salon:** {ch.mention if ch else ch_id}\n**Fermé par:** {interaction.user}\n**Créé par:** {owner_mention}\n**Heure:** <t:{int(datetime.utcnow().timestamp())}:F>", color=0xe74c3c, timestamp=datetime.utcnow())
+            await send_log(interaction.guild, log)
+        except Exception:
+            pass
+        # delete channel
+        try:
+            if ch:
+                await ch.delete(reason=f"Ticket fermé par admin {interaction.user}")
+        except Exception as e:
+            print("admin close_selected delete error:", e)
+        # remove from config
+        try:
+            if str(ch_id) in gcfg.get("openTickets", {}):
+                del gcfg["openTickets"][str(ch_id)]
+                save_config(config)
+        except Exception:
+            pass
+        await interaction.response.send_message("✅ Ticket fermé.", ephemeral=True)
+
+    @discord.ui.button(label="🧹 Fermer Tous les Tickets", style=ButtonStyle.secondary, custom_id="admin_close_all")
+    async def close_all(self, button: Button, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Seul l'auteur peut utiliser ce panneau.", ephemeral=True)
+            return
+        gcfg = self.gcfg
+        tickets = list((gcfg.get("openTickets") or {}).keys())
+        failures = 0
+        for ch_id in tickets:
+            try:
+                ch = interaction.guild.get_channel(int(ch_id))
+                # log per-ticket
+                ticket_entry = gcfg.get("openTickets", {}).get(str(ch_id))
+                owner_mention = f"<@{ticket_entry.get('owner')}>" if ticket_entry else "inconnu"
+                try:
+                    log = Embed(title="🔒 Ticket Fermé (Admin - Batch)", description=f"**Salon:** {ch.mention if ch else ch_id}\n**Fermé par:** {interaction.user}\n**Créé par:** {owner_mention}\n**Heure:** <t:{int(datetime.utcnow().timestamp())}:F>", color=0xe74c3c, timestamp=datetime.utcnow())
+                    await send_log(interaction.guild, log)
+                except Exception:
+                    pass
+                if ch:
+                    await ch.delete(reason=f"Ticket fermé par admin {interaction.user}")
+                # remove from config
+                if str(ch_id) in gcfg.get("openTickets", {}):
+                    del gcfg["openTickets"][str(ch_id)]
+            except Exception as e:
+                print("admin close_all error for", ch_id, e)
+                failures += 1
+        save_config(config)
+        await interaction.response.send_message(f"✅ Fermeture terminée. Échecs: {failures}", ephemeral=True)
+
+    @discord.ui.button(label="🔄 Rafraîchir", style=ButtonStyle.primary, custom_id="admin_refresh")
+    async def refresh(self, button: Button, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Seul l'auteur peut utiliser ce panneau.", ephemeral=True)
+            return
+        # Rebuild options quickly and edit the message (note: ephemeral messages can't be edited after send in same way,
+        # so we just reply with ephemeral updated summary)
+        entries = gcfg = self.gcfg.get("openTickets", {})
+        if not entries:
+            await interaction.response.send_message("Aucun ticket ouvert.", ephemeral=True)
+            return
+        text = "Tickets ouverts:\n"
+        for ch_id, info in entries.items():
+            created = info.get("created")
+            owner = info.get("owner")
+            created_str = datetime.utcfromtimestamp(created).strftime("%Y-%m-%d %H:%M") if created else "inconnu"
+            text += f"- #{ch_id} — {created_str} — <@{owner}>\n"
+        await interaction.response.send_message(text, ephemeral=True)
 
 # === Stats updater task & command ===
 _stats_task = None
@@ -564,6 +736,27 @@ async def cmd_ticketrole(ctx, role: discord.Role = None):
     gcfg.setdefault("ticketRoles", []).append(str(role.id))
     save_config(config)
     await ctx.reply(f"✅ Le rôle {role.mention} sera mentionné dans les nouveaux tickets.")
+
+@bot.command(name="ticketadmin")
+@admin_required()
+async def cmd_ticketadmin(ctx):
+    """Open an admin panel showing open tickets and actions."""
+    gcfg = get_gcfg(ctx.guild.id)
+    view = AdminTicketView(gcfg, ctx.author.id)
+    # build a summary embed
+    embed = Embed(title="🔧 Panneau Admin - Tickets", color=0x95a5a6)
+    entries = gcfg.get("openTickets", {})
+    if not entries:
+        embed.description = "Aucun ticket ouvert."
+    else:
+        s = ""
+        for ch_id, info in entries.items():
+            created_ts = info.get("created")
+            owner = info.get("owner")
+            created_str = datetime.utcfromtimestamp(created_ts).strftime("%Y-%m-%d %H:%M") if created_ts else "inconnu"
+            s += f"- <#{ch_id}> — {created_str} — <@{owner}>\n"
+        embed.description = s
+    await ctx.reply(embed=embed, view=view, ephemeral=False)
 
 @bot.command(name="ban")
 @commands.has_permissions(ban_members=True)
