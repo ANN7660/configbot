@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """
-Discord bot converted from your Node.js bot.
-Features: prefix commands, interactive help, welcome/leave, tickets, role reacts,
-temp voice channels, moderation (ban/unban/timeout), config storage in JSON.
-Ready for hosting on Render as a Web Service (with FastAPI health endpoint).
+Hoshikuzu.py - Discord bot
+Features:
+ - prefix commands (!)
+ - interactive help
+ - separate welcome embed channel & welcome text channel
+ - tickets (create, close with confirmation, logs)
+ - ticket admin panel (select, close single, close all, refresh)
+ - role reactions
+ - temporary voice channels (join-to-create)
+ - moderation (ban/unban/mute/unmute/lock/unlock/slowmode)
+ - stats voice channels with background updater
+ - FastAPI health endpoint (suitable for Render)
+Config stored in config.json
 """
 
 import os
@@ -13,14 +22,14 @@ from datetime import datetime, timedelta
 from typing import Optional
 import threading
 
-# Web server imports (placed near top per your request - Option A)
+# Web server imports
 from fastapi import FastAPI
 import uvicorn
 
 from dotenv import load_dotenv
 import discord
 from discord import Embed, ButtonStyle, SelectOption
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord.ui import View, Button, Select
 
 # -------------------------
@@ -33,27 +42,21 @@ async def root():
     return {"status": "ok", "service": "discord-bot"}
 
 def run_webserver():
-    # Render will set PORT environment variable; fallback to 10000
     port = int(os.environ.get("PORT", 10000))
-    # uvicorn.run is blocking; run it in this thread
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
 
-# We'll start the webserver thread later (after file load) to avoid import-time issues.
-# Start it as a daemon so the process exits cleanly with the bot.
 web_thread = threading.Thread(target=run_webserver, daemon=True)
 web_thread.start()
 
 # -------------------------
 # Bot setup
 # -------------------------
-# Load .env if present
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is required.")
 
-# Constants
 DB_FILE = "config.json"
 PREFIX = "!"
 
@@ -84,11 +87,13 @@ def get_gcfg(guild_id):
     gid = str(guild_id)
     if gid not in config:
         config[gid] = {
+            # Welcome: separate channels for text and embed
             "welcomeEmbed": None,
             "welcomeText": None,
+            "welcomeEmbedChannel": None,   # channel for embed welcomes
+            "welcomeTextChannel": None,    # channel for text welcomes
             "leaveEmbed": None,
             "leaveText": None,
-            "welcomeChannel": None,
             "leaveChannel": None,
             "ticketCategory": None,
             "ticketRoles": [],
@@ -107,16 +112,12 @@ def get_gcfg(guild_id):
 
 # --- Utilities ---
 def parse_duration(duration: str) -> Optional[int]:
-    """
-    Parse duration strings like 10s, 5m, 1h, 1d
-    Returns seconds (int) or None if invalid.
-    """
     if not duration:
         return None
     unit = duration[-1]
     try:
         value = int(duration[:-1])
-    except ValueError:
+    except Exception:
         return None
     multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     if unit not in multipliers:
@@ -133,8 +134,11 @@ async def send_log(guild: discord.Guild, embed: Embed):
         if ch:
             await ch.send(embed=embed)
     except Exception:
-        # ignore logging errors
         pass
+
+def sanitize_name(name: str) -> str:
+    # simple sanitize for channel names
+    return "".join(c for c in name.lower() if c.isalnum() or c in "-_").replace(" ", "-")[:90]
 
 # --- Help menu view (persistent) ---
 class HelpSelect(Select):
@@ -147,32 +151,25 @@ class HelpSelect(Select):
             SelectOption(label="🔊 Vocaux Temporaires", value="voice"),
             SelectOption(label="⚙️ Configuration", value="config")
         ]
-        # custom_id is required for persistence
-        super().__init__(
-            placeholder="Sélectionner une catégorie",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="help_select"
-        )
+        super().__init__(placeholder="Sélectionner une catégorie", min_values=1, max_values=1, options=options, custom_id="help_select")
 
     async def callback(self, interaction: discord.Interaction):
         val = self.values[0]
         if val == "welcome":
             embed = Embed(title="👋 Bienvenue & Départ", color=0x2ecc71)
             embed.description = (
-                "**!bvntext** `<message>`\n"
-                "**!bvnembed** `<description>`\n"
-                "**!leavetxt** `<message>`\n"
-                "**!leaveembed** `<description>`\n\n"
-                "Variables: `{user}` `{server}` `{membercount}`"
+                "**!bvntext** `<message>` — configure le message texte de bienvenue\n"
+                "**!bvnembed** `<description>` — configure l'embed de bienvenue\n"
+                "**!bvntextchannel** `#channel` — salon où envoyer le texte de bienvenue\n"
+                "**!bvnembedchannel** `#channel` — salon où envoyer l'embed de bienvenue\n\n"
+                "Variables disponibles: `{user}` `{server}` `{membercount}`"
             )
         elif val == "tickets":
             embed = Embed(title="🎫 Tickets", color=0x3498db)
-            embed.description = "**!ticketpanel** - créer panel\n**!ticketrole** @role - ajouter rôle ticket\n**!ticketadmin** - panneau administrateur tickets"
+            embed.description = "**!ticketpanel** - créer le panel de tickets\n**!ticketrole** @role - ajouter rôle support\n**!ticketadmin** - panneau d'administration des tickets"
         elif val == "moderation":
             embed = Embed(title="🛡️ Modération", color=0xe74c3c)
-            embed.description = "**!ban** `@user [raison]`\n**!unban** `<id>`\n**!mute** `@user <durée> [raison]`\n**!unmute** `@user`"
+            embed.description = "**!ban** `@user [raison]`  •  **!unban** `<id>`  •  **!mute** `@user <durée>`  •  **!unmute** `@user`"
         elif val == "roles":
             embed = Embed(title="🎭 Rôles & Réactions", color=0x9b59b6)
             embed.description = "**!rolereact** `@role <emoji>`\n**!joinrole** `@role`"
@@ -181,17 +178,14 @@ class HelpSelect(Select):
             embed.description = "**!createvoc** - créer système join-to-create"
         else:
             embed = Embed(title="⚙️ Configuration", color=0x95a5a6)
-            embed.description = "**!config** - menu interactif"
-        # edit the original message that contains the select
+            embed.description = "**!config** - menu interactif\n**!createstats** - crée 4 salons vocaux statistiques"
         try:
             await interaction.response.edit_message(embed=embed, view=self.view)
         except Exception:
-            # fallback: send ephemeral message
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class HelpView(View):
     def __init__(self):
-        # timeout=None to be persistent
         super().__init__(timeout=None)
         self.add_item(HelpSelect())
 
@@ -199,18 +193,32 @@ class HelpView(View):
 class TicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
-        # We rely on the decorator-defined button below (avoid duplicate add_item)
 
-    # Note: callback signature is (self, interaction) for @discord.ui.button
     @discord.ui.button(label="📩 Créer un Ticket", style=ButtonStyle.primary, custom_id="create_ticket")
-    async def create_ticket(self, interaction: discord.Interaction):
-        # interaction param is the Interaction
-        gcfg = get_gcfg(interaction.guild.id)
-        # Check existing ticket by name
-        existing = discord.utils.get(interaction.guild.text_channels, name=f"ticket-{interaction.user.name.lower()}")
+    async def create_ticket(self, button: Button, interaction: discord.Interaction):
+        # interaction is the Interaction; button param present due to decorator signature
+        try:
+            gcfg = get_gcfg(interaction.guild.id)
+        except Exception:
+            await interaction.response.send_message("❌ Impossible de lire la configuration du serveur.", ephemeral=True)
+            return
+
+        # prevent multiple tickets for same owner by checking openTickets
+        existing = None
+        for ch_id, info in (gcfg.get("openTickets") or {}).items():
+            if info.get("owner") == str(interaction.user.id):
+                # try to fetch channel
+                try:
+                    ch = interaction.guild.get_channel(int(ch_id))
+                    if ch:
+                        existing = ch
+                        break
+                except Exception:
+                    pass
         if existing:
             await interaction.response.send_message(f"❌ Vous avez déjà un ticket: {existing.mention}", ephemeral=True)
             return
+
         await interaction.response.defer(ephemeral=True)
         try:
             category_id = gcfg.get("ticketCategory")
@@ -219,16 +227,30 @@ class TicketView(View):
                 interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             }
             category_obj = interaction.guild.get_channel(int(category_id)) if category_id else None
+
+            # channel name friendly
+            name = sanitize_name(f"ticket-{interaction.user.name}")
+            # ensure uniqueness by appending counter if needed
+            base_name = name
+            counter = 1
+            while discord.utils.get(interaction.guild.text_channels, name=name):
+                name = f"{base_name}-{counter}"
+                counter += 1
+
             channel = await interaction.guild.create_text_channel(
-                name=f"ticket-{interaction.user.name}",
+                name=name,
                 category=category_obj,
                 overwrites=overwrites
             )
+
             # add support roles permissions
             for rid in gcfg.get("ticketRoles", []):
-                role = interaction.guild.get_role(int(rid))
-                if role:
-                    await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
+                try:
+                    role = interaction.guild.get_role(int(rid))
+                    if role:
+                        await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
+                except Exception:
+                    pass
 
             # store open ticket
             gcfg.setdefault("openTickets", {})[str(channel.id)] = {
@@ -237,12 +259,12 @@ class TicketView(View):
             }
             save_config(config)
 
-            embed = Embed(title="🎫 Nouveau Ticket", description=f"Bonjour {interaction.user.mention}, décris ton problème.", color=0x3498db)
+            embed = Embed(title="🎫 Nouveau Ticket", description=f"Bonjour {interaction.user.mention}, décris ton problème ici. Un membre du support arrivera bientôt.", color=0x3498db)
             close_view = View(timeout=None)
-            # closing button triggers on_interaction (custom_id pattern)
             close_view.add_item(Button(label="🔒 Fermer le Ticket", custom_id=f"close_ticket_{channel.id}", style=ButtonStyle.danger))
             mentions = interaction.user.mention + (" " + " ".join(f"<@&{r}>" for r in gcfg.get("ticketRoles", [])) if gcfg.get("ticketRoles") else "")
             await channel.send(content=mentions, embed=embed, view=close_view)
+
             await interaction.followup.send(f"✅ Ticket créé: {channel.mention}", ephemeral=True)
 
             log = Embed(title="🎫 Ticket Créé", description=f"**Salon:** {channel.mention}\n**Créé par:** {interaction.user} (`{interaction.user.id}`)\n**Heure:** <t:{int(datetime.utcnow().timestamp())}:F>", color=0x3498db, timestamp=datetime.utcnow())
@@ -254,56 +276,56 @@ class TicketView(View):
 # Close ticket buttons are handled in on_interaction
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    # Only handle component interactions here
     if interaction.type != discord.InteractionType.component:
         return
-    cid = interaction.data.get("custom_id", "") if interaction.data else ""
-    # User clicked the close ticket button inside the ticket channel
-    if cid.startswith("close_ticket_"):
-        # Show confirmation view
-        confirm = View(timeout=None)
-        confirm.add_item(Button(label="✅ Confirmer", custom_id=f"confirm_close_{interaction.channel.id}", style=ButtonStyle.danger))
-        confirm.add_item(Button(label="❌ Annuler", custom_id="cancel_close", style=ButtonStyle.secondary))
-        await interaction.response.send_message(embed=Embed(title="❓ Confirmer la fermeture", description="Êtes-vous sûr de fermer ce ticket ?"), view=confirm, ephemeral=True)
+    cid = ""
+    if interaction.data:
+        cid = interaction.data.get("custom_id", "") or interaction.data.get("customId", "")
+    if not cid:
         return
 
+    # User clicked the close ticket button inside the ticket channel
+    if cid.startswith("close_ticket_"):
+        # Show confirmation view (ephemeral)
+        confirm = View(timeout=None)
+        confirm.add_item(Button(label="✅ Confirmer", custom_id=f"confirm_close_{cid.split('_')[-1]}", style=ButtonStyle.danger))
+        confirm.add_item(Button(label="❌ Annuler", custom_id="cancel_close", style=ButtonStyle.secondary))
+        try:
+            await interaction.response.send_message(embed=Embed(title="❓ Confirmer la fermeture", description="Êtes-vous sûr de fermer ce ticket ?"), view=confirm, ephemeral=True)
+        except Exception:
+            pass
+        return
+
+    # Confirm close
     if cid.startswith("confirm_close_"):
-        # Confirm close: gather info, log, delete channel and remove from openTickets
         chan_id = cid.replace("confirm_close_", "")
-        # ensure the interaction channel is the ticket channel or admin triggered
         target_channel = None
         try:
-            if str(interaction.channel.id) == chan_id:
+            if interaction.channel and str(interaction.channel.id) == chan_id:
                 target_channel = interaction.channel
             else:
-                # try fetch by id from guild
-                target_channel = interaction.guild.get_channel(int(chan_id))
+                target_channel = interaction.guild.get_channel(int(chan_id)) if interaction.guild else None
         except Exception:
             target_channel = None
+
         try:
-            # find owner info from config if present
             gcfg = get_gcfg(interaction.guild.id)
             ticket_entry = gcfg.get("openTickets", {}).get(str(chan_id))
             owner_mention = "Inconnu"
-            owner_id = None
             if ticket_entry:
-                owner_id = ticket_entry.get("owner")
-                try:
-                    owner_mention = f"<@{owner_id}>"
-                except Exception:
-                    owner_mention = "Inconnu"
-            # send log
+                owner_mention = f"<@{ticket_entry.get('owner')}>"
             log = Embed(title="🔒 Ticket Fermé", description=f"**Salon:** {target_channel.mention if target_channel else chan_id}\n**Fermé par:** {interaction.user} (`{interaction.user.id}`)\n**Créé par:** {owner_mention}\n**Heure:** <t:{int(datetime.utcnow().timestamp())}:F>", color=0xe74c3c, timestamp=datetime.utcnow())
             await send_log(interaction.guild, log)
         except Exception as e:
             print("confirm_close logging error:", e)
-        # try to edit the ephemeral confirmation message to show closing
+
         try:
-            await interaction.response.edit_message(content="🔒 Fermeture du ticket...", embed=None, view=None)
-        except Exception:
-            pass
-        # delete channel after short pause
-        try:
+            # Edit ephemeral confirmation if possible
+            try:
+                await interaction.response.edit_message(content="🔒 Fermeture du ticket...", embed=None, view=None)
+            except Exception:
+                # maybe already responded; ignore
+                pass
             await asyncio.sleep(1.5)
             if target_channel:
                 await target_channel.delete(reason=f"Ticket fermé par {interaction.user}")
@@ -329,8 +351,6 @@ async def on_interaction(interaction: discord.Interaction):
                 pass
         return
 
-    # Admin panel button handling (from AdminTicketView) - handled by view callbacks instead of here
-
 # === Admin ticket management view ===
 class AdminTicketView(View):
     def __init__(self, gcfg, author_id):
@@ -338,24 +358,21 @@ class AdminTicketView(View):
         self.gcfg = gcfg
         self.author_id = author_id
         self.selected_channel: Optional[str] = None
-        # build select options from openTickets
+
         options = []
         for ch_id, info in (gcfg.get("openTickets") or {}).items():
             owner_id = info.get("owner")
             created_ts = info.get("created")
-            label = f"#{ch_id} - créé {datetime.utcfromtimestamp(created_ts).strftime('%Y-%m-%d %H:%M')}" if created_ts else f"#{ch_id}"
+            label_time = datetime.utcfromtimestamp(created_ts).strftime('%Y-%m-%d %H:%M') if created_ts else "inconnu"
+            label = f"{ch_id} • {label_time}"
             desc = f"Owner: <@{owner_id}>" if owner_id else "Owner: inconnu"
-            # make sure label not too long
             options.append(SelectOption(label=label[:100], value=str(ch_id), description=desc[:100]))
         if not options:
             options = [SelectOption(label="Aucun ticket ouvert", value="none", description="Il n'y a pas de tickets ouverts.")]
+
         self.select = Select(placeholder="Sélectionnez un ticket", min_values=1, max_values=1, options=options, custom_id="admin_ticket_select")
         self.select.callback = self.select_callback
         self.add_item(self.select)
-        # buttons
-        self.add_item(Button(label="❌ Fermer le Ticket Sélectionné", style=ButtonStyle.danger, custom_id="admin_close_selected"))
-        self.add_item(Button(label="🧹 Fermer Tous les Tickets", style=ButtonStyle.secondary, custom_id="admin_close_all"))
-        self.add_item(Button(label="🔄 Rafraîchir", style=ButtonStyle.primary, custom_id="admin_refresh"))
 
     async def select_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
@@ -373,8 +390,7 @@ class AdminTicketView(View):
             await interaction.response.send_message("❌ Aucun ticket sélectionné.", ephemeral=True)
             return
         ch_id = self.selected_channel
-        ch = interaction.guild.get_channel(int(ch_id))
-        # log
+        ch = interaction.guild.get_channel(int(ch_id)) if interaction.guild else None
         gcfg = self.gcfg
         ticket_entry = gcfg.get("openTickets", {}).get(str(ch_id))
         owner_mention = f"<@{ticket_entry.get('owner')}>" if ticket_entry else "inconnu"
@@ -383,13 +399,11 @@ class AdminTicketView(View):
             await send_log(interaction.guild, log)
         except Exception:
             pass
-        # delete channel
         try:
             if ch:
                 await ch.delete(reason=f"Ticket fermé par admin {interaction.user}")
         except Exception as e:
             print("admin close_selected delete error:", e)
-        # remove from config
         try:
             if str(ch_id) in gcfg.get("openTickets", {}):
                 del gcfg["openTickets"][str(ch_id)]
@@ -408,8 +422,7 @@ class AdminTicketView(View):
         failures = 0
         for ch_id in tickets:
             try:
-                ch = interaction.guild.get_channel(int(ch_id))
-                # log per-ticket
+                ch = interaction.guild.get_channel(int(ch_id)) if interaction.guild else None
                 ticket_entry = gcfg.get("openTickets", {}).get(str(ch_id))
                 owner_mention = f"<@{ticket_entry.get('owner')}>" if ticket_entry else "inconnu"
                 try:
@@ -419,7 +432,6 @@ class AdminTicketView(View):
                     pass
                 if ch:
                     await ch.delete(reason=f"Ticket fermé par admin {interaction.user}")
-                # remove from config
                 if str(ch_id) in gcfg.get("openTickets", {}):
                     del gcfg["openTickets"][str(ch_id)]
             except Exception as e:
@@ -433,9 +445,7 @@ class AdminTicketView(View):
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("❌ Seul l'auteur peut utiliser ce panneau.", ephemeral=True)
             return
-        # Rebuild options quickly and edit the message (note: ephemeral messages can't be edited after send in same way,
-        # so we just reply with ephemeral updated summary)
-        entries = gcfg = self.gcfg.get("openTickets", {})
+        entries = self.gcfg.get("openTickets", {}) or {}
         if not entries:
             await interaction.response.send_message("Aucun ticket ouvert.", ephemeral=True)
             return
@@ -444,7 +454,7 @@ class AdminTicketView(View):
             created = info.get("created")
             owner = info.get("owner")
             created_str = datetime.utcfromtimestamp(created).strftime("%Y-%m-%d %H:%M") if created else "inconnu"
-            text += f"- #{ch_id} — {created_str} — <@{owner}>\n"
+            text += f"- <#{ch_id}> — {created_str} — <@{owner}>\n"
         await interaction.response.send_message(text, ephemeral=True)
 
 # === Stats updater task & command ===
@@ -452,17 +462,14 @@ _stats_task = None
 _stats_task_lock = asyncio.Lock()
 
 async def stats_updater_loop():
-    """Background loop that updates stats channels every 60s for guilds with statsChannels configured."""
     await bot.wait_until_ready()
     while not bot.is_closed():
         try:
             for guild in bot.guilds:
                 gcfg = get_gcfg(guild.id)
                 chan_ids = gcfg.get("statsChannels") or []
-                # Expecting 4 voice channel ids in order: members, bots, in_voice, total_channels
                 if len(chan_ids) < 4:
                     continue
-                # fetch channels
                 channels = []
                 for cid in chan_ids:
                     try:
@@ -474,7 +481,6 @@ async def stats_updater_loop():
                 bots = len([m for m in guild.members if m.bot])
                 in_voice = len([m for m in guild.members if m.voice and m.voice.channel])
                 total_channels = len(guild.channels)
-                # update names if channel exists
                 try:
                     if channels[0]:
                         await channels[0].edit(name=f"👥 Membres : {members}")
@@ -485,10 +491,8 @@ async def stats_updater_loop():
                     if channels[3]:
                         await channels[3].edit(name=f"📁 Salons : {total_channels}")
                 except Exception:
-                    # ignore per-guild update errors
                     pass
         except Exception:
-            # ignore global errors and continue
             pass
         await asyncio.sleep(60)
 
@@ -496,14 +500,12 @@ async def stats_updater_loop():
 @bot.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {bot.user} (id: {bot.user.id})")
-    # Ensure persistent views (Select/button custom_id + timeout=None required)
     try:
         bot.add_view(HelpView())
         bot.add_view(TicketView())
     except Exception as e:
         print("Erreur add_view:", e)
 
-    # Start stats updater once
     global _stats_task
     async with _stats_task_lock:
         if _stats_task is None:
@@ -512,7 +514,6 @@ async def on_ready():
 @bot.event
 async def on_member_join(member: discord.Member):
     gcfg = get_gcfg(member.guild.id)
-    # assign join role
     jr = gcfg.get("joinRole")
     if jr:
         role = member.guild.get_role(int(jr))
@@ -521,12 +522,13 @@ async def on_member_join(member: discord.Member):
                 await member.add_roles(role)
             except Exception:
                 pass
-    # welcome messages
-    wc = gcfg.get("welcomeChannel")
-    if wc:
-        ch = member.guild.get_channel(int(wc))
-        if ch:
-            if gcfg.get("welcomeEmbed"):
+
+    # Welcome Embed -> separate channel
+    we_ch = gcfg.get("welcomeEmbedChannel")
+    if we_ch:
+        try:
+            ch = member.guild.get_channel(int(we_ch))
+            if ch and gcfg.get("welcomeEmbed"):
                 we = gcfg["welcomeEmbed"]
                 try:
                     color_val = int(we.get("color", "0x2ecc71").replace("#", "0x"), 16)
@@ -541,11 +543,23 @@ async def on_member_join(member: discord.Member):
                     embed.set_thumbnail(url=member.display_avatar.url)
                 except Exception:
                     pass
+                embed.set_footer(text=f"Membre #{member.guild.member_count}")
                 await ch.send(embed=embed)
-            if gcfg.get("welcomeText"):
+        except Exception:
+            pass
+
+    # Welcome Text -> separate channel
+    wt_ch = gcfg.get("welcomeTextChannel")
+    if wt_ch:
+        try:
+            ch = member.guild.get_channel(int(wt_ch))
+            if ch and gcfg.get("welcomeText"):
                 txt = gcfg["welcomeText"].replace("{user}", member.mention).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count))
                 await ch.send(txt)
-    # log
+        except Exception:
+            pass
+
+    # log join
     log = Embed(title="📥 Membre Rejoint", description=f"**Membre:** {member} (`{member.id}`)\n**Compte créé:** <t:{int(member.created_at.timestamp())}:R>", color=0x2ecc71, timestamp=datetime.utcnow())
     try:
         await send_log(member.guild, log)
@@ -584,7 +598,7 @@ async def on_member_remove(member: discord.Member):
     except Exception:
         pass
 
-# Reaction role handling (use raw events to work across cache)
+# Reaction role handling
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.user_id == bot.user.id:
@@ -632,7 +646,6 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 # Temporary voice channels
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # guard
     if member.guild is None:
         return
     gcfg = get_gcfg(member.guild.id)
@@ -646,7 +659,6 @@ async def on_voice_state_update(member, before, after):
             gcfg.setdefault("tempVocChannels", []).append(str(temp.id))
             save_config(config)
             await member.move_to(temp)
-            # Give manager perms to owner
             await temp.set_permissions(member, manage_channels=True, move_members=True, connect=True)
         except Exception:
             pass
@@ -689,10 +701,30 @@ async def cmd_bvnembed(ctx, *, description: str = None):
     if not description:
         return await ctx.reply("❌ Usage: `!bvnembed <description>`")
     gcfg = get_gcfg(ctx.guild.id)
-    gcfg["welcomeEmbed"] = {"title": "👋 Bienvenue!", "description": description, "color": "#00ff00"}
+    gcfg["welcomeEmbed"] = {"title": "👋 Bienvenue!", "description": description, "color": "#2ecc71"}
     save_config(config)
-    embed = Embed(title="👋 Bienvenue!", description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name).replace("{membercount}", str(ctx.guild.member_count)), color=0x00ff00)
+    embed = Embed(title="👋 Bienvenue!", description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name).replace("{membercount}", str(ctx.guild.member_count)), color=0x2ecc71)
     await ctx.reply("✅ Embed de bienvenue configuré! Aperçu:", embed=embed)
+
+@bot.command(name="bvntextchannel")
+@admin_required()
+async def cmd_bvntextchannel(ctx, channel: discord.TextChannel = None):
+    if not channel:
+        return await ctx.reply("❌ Usage: `!bvntextchannel #channel`")
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg["welcomeTextChannel"] = str(channel.id)
+    save_config(config)
+    await ctx.reply(f"✅ Salon de bienvenue (texte) configuré: {channel.mention}")
+
+@bot.command(name="bvnembedchannel")
+@admin_required()
+async def cmd_bvnembedchannel(ctx, channel: discord.TextChannel = None):
+    if not channel:
+        return await ctx.reply("❌ Usage: `!bvnembedchannel #channel`")
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg["welcomeEmbedChannel"] = str(channel.id)
+    save_config(config)
+    await ctx.reply(f"✅ Salon de bienvenue (embed) configuré: {channel.mention}")
 
 @bot.command(name="leavetxt")
 @admin_required()
@@ -740,10 +772,8 @@ async def cmd_ticketrole(ctx, role: discord.Role = None):
 @bot.command(name="ticketadmin")
 @admin_required()
 async def cmd_ticketadmin(ctx):
-    """Open an admin panel showing open tickets and actions."""
     gcfg = get_gcfg(ctx.guild.id)
     view = AdminTicketView(gcfg, ctx.author.id)
-    # build a summary embed
     embed = Embed(title="🔧 Panneau Admin - Tickets", color=0x95a5a6)
     entries = gcfg.get("openTickets", {})
     if not entries:
@@ -758,6 +788,7 @@ async def cmd_ticketadmin(ctx):
         embed.description = s
     await ctx.reply(embed=embed, view=view, ephemeral=False)
 
+# Moderation commands (ban/unban/mute/unmute/lock/unlock/slowmode) - unchanged logic
 @bot.command(name="ban")
 @commands.has_permissions(ban_members=True)
 async def cmd_ban(ctx, member: discord.Member = None, *, reason: str = "Aucune raison fournie"):
@@ -872,7 +903,6 @@ async def cmd_rolereact(ctx, role: discord.Role = None, emoji: str = None, *, de
 @commands.has_permissions(manage_channels=True)
 async def cmd_createvoc(ctx):
     try:
-        # create category if not exists
         category = discord.utils.get(ctx.guild.categories, name="🔊 Vocaux Temporaires")
         if not category:
             category = await ctx.guild.create_category("🔊 Vocaux Temporaires")
@@ -901,9 +931,10 @@ async def cmd_config(ctx):
     embed = Embed(title="⚙️ Configuration du Bot", description="Sélectionnez ce que vous souhaitez configurer", color=0x3498db)
     view = View(timeout=60)
     select = Select(placeholder="Sélectionner une option", min_values=1, max_values=1, options=[
-        SelectOption(label="👋 Salon de Bienvenue (channel)", value="welcome_channel"),
+        SelectOption(label="👋 Salon de Bienvenue (embed)", value="welcome_embed_channel"),
+        SelectOption(label="👋 Salon de Bienvenue (texte)", value="welcome_text_channel"),
         SelectOption(label="✉️ Message de Bienvenue (texte)", value="welcome_text"),
-        SelectOption(label="🖼️ Embed de Bienvenue", value="welcome_embed"),
+        SelectOption(label="🖼️ Embed de Bienvenue (titre|description|#hexcolor)", value="welcome_embed"),
         SelectOption(label="👋 Salon de Départ", value="leave_channel"),
         SelectOption(label="🎫 Catégorie Tickets", value="ticket_category"),
         SelectOption(label="📝 Salon de Logs", value="log_channel"),
@@ -914,7 +945,7 @@ async def cmd_config(ctx):
             await interaction.response.send_message("❌ Seul l'auteur de la commande peut répondre.", ephemeral=True)
             return
         opt = select.values[0]
-        await interaction.response.send_message(f"📝 Mentionnez le salon/role/catégorie/texte pour **{opt}**:", ephemeral=True)
+        await interaction.response.send_message(f"📝 Envoyez maintenant la mention / le texte pour **{opt}**:", ephemeral=True)
         def check(m):
             return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
         try:
@@ -923,13 +954,42 @@ async def cmd_config(ctx):
             await interaction.followup.send("❌ Temps écoulé.", ephemeral=True)
             return
         gcfg = get_gcfg(ctx.guild.id)
-        # channels
-        if opt == "welcome_channel":
+        if opt == "welcome_embed_channel":
             ch = msg.channel_mentions[0] if msg.channel_mentions else None
             if ch:
-                gcfg["welcomeChannel"] = str(ch.id)
+                gcfg["welcomeEmbedChannel"] = str(ch.id)
                 save_config(config)
-                await msg.reply(f"✅ Salon de bienvenue configuré: {ch.mention}")
+                await msg.reply(f"✅ Salon de bienvenue (embed) configuré: {ch.mention}")
+                return
+        if opt == "welcome_text_channel":
+            ch = msg.channel_mentions[0] if msg.channel_mentions else None
+            if ch:
+                gcfg["welcomeTextChannel"] = str(ch.id)
+                save_config(config)
+                await msg.reply(f"✅ Salon de bienvenue (texte) configuré: {ch.mention}")
+                return
+        if opt == "welcome_text":
+            text = msg.content.strip()
+            if text:
+                gcfg["welcomeText"] = text
+                save_config(config)
+                await msg.reply("✅ Message de bienvenue (texte) configuré.")
+                return
+        if opt == "welcome_embed":
+            parts = [p.strip() for p in msg.content.split("|")]
+            if len(parts) >= 2:
+                title = parts[0]
+                description = parts[1]
+                color = parts[2] if len(parts) >= 3 else "#2ecc71"
+                gcfg["welcomeEmbed"] = {"title": title, "description": description, "color": color}
+                save_config(config)
+                await msg.reply("✅ Embed de bienvenue configuré. Aperçu:")
+                try:
+                    color_val = int(color.replace("#", "0x"), 16)
+                except Exception:
+                    color_val = 0x2ecc71
+                preview = Embed(title=title, description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name).replace("{membercount}", str(ctx.guild.member_count)), color=color_val)
+                await ctx.channel.send(embed=preview)
                 return
         if opt == "leave_channel":
             ch = msg.channel_mentions[0] if msg.channel_mentions else None
@@ -938,14 +998,6 @@ async def cmd_config(ctx):
                 save_config(config)
                 await msg.reply(f"✅ Salon de départ configuré: {ch.mention}")
                 return
-        if opt == "log_channel":
-            ch = msg.channel_mentions[0] if msg.channel_mentions else None
-            if ch:
-                gcfg["logChannel"] = str(ch.id)
-                save_config(config)
-                await msg.reply(f"✅ Salon de logs configuré: {ch.mention}")
-                return
-        # ticket category
         if opt == "ticket_category":
             cat = msg.channel_mentions[0] if msg.channel_mentions else None
             if cat and isinstance(cat, discord.channel.CategoryChannel):
@@ -953,7 +1005,13 @@ async def cmd_config(ctx):
                 save_config(config)
                 await msg.reply(f"✅ Catégorie tickets configurée: {cat.name}")
                 return
-        # join role
+        if opt == "log_channel":
+            ch = msg.channel_mentions[0] if msg.channel_mentions else None
+            if ch:
+                gcfg["logChannel"] = str(ch.id)
+                save_config(config)
+                await msg.reply(f"✅ Salon de logs configuré: {ch.mention}")
+                return
         if opt == "join_role":
             role = msg.role_mentions[0] if msg.role_mentions else None
             if role:
@@ -961,35 +1019,7 @@ async def cmd_config(ctx):
                 save_config(config)
                 await msg.reply(f"✅ Rôle configuré: {role.mention}")
                 return
-        # welcome text
-        if opt == "welcome_text":
-            # take the message content raw as template
-            text = msg.content.strip()
-            if text:
-                gcfg["welcomeText"] = text
-                save_config(config)
-                await msg.reply("✅ Message de bienvenue (texte) configuré.")
-                return
-        # welcome embed (simple: title|description|#hexcolor) or accept JSON-ish? Keep simple:
-        if opt == "welcome_embed":
-            # Expect user to send: title | description | #hexcolor
-            parts = [p.strip() for p in msg.content.split("|")]
-            if len(parts) >= 2:
-                title = parts[0]
-                description = parts[1]
-                color = parts[2] if len(parts) >= 3 else "#00ff00"
-                gcfg["welcomeEmbed"] = {"title": title, "description": description, "color": color}
-                save_config(config)
-                await msg.reply(f"✅ Embed de bienvenue configuré (titre + description). Exemple de preview envoyé.")
-                # send preview
-                try:
-                    color_val = int(color.replace("#", "0x"), 16)
-                except Exception:
-                    color_val = 0x00ff00
-                preview = Embed(title=title, description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name).replace("{membercount}", str(ctx.guild.member_count)), color=color_val)
-                await ctx.channel.send(embed=preview)
-                return
-        await msg.reply("❌ Élément invalide ou non trouvé / format incorrect.")
+        await msg.reply("❌ Élément invalide ou format incorrect.")
     select.callback = select_callback
     view.add_item(select)
     await ctx.reply(embed=embed, view=view)
@@ -999,15 +1029,12 @@ async def cmd_config(ctx):
 @commands.has_permissions(manage_channels=True)
 async def cmd_createstats(ctx):
     gcfg = get_gcfg(ctx.guild.id)
-    # If already created, refuse
     if gcfg.get("statsChannels"):
         return await ctx.reply("❌ Les salons statistiques existent déjà sur ce serveur.")
-    # Create category
     try:
         category = discord.utils.get(ctx.guild.categories, name="📊・Statistiques")
         if not category:
             category = await ctx.guild.create_category("📊・Statistiques")
-        # create four voice channels (so they show on sidebar and we can edit their names)
         ch1 = await ctx.guild.create_voice_channel(f"👥 Membres : {ctx.guild.member_count}", category=category)
         ch2 = await ctx.guild.create_voice_channel(f"🤖 Bots : {len([m for m in ctx.guild.members if m.bot])}", category=category)
         ch3 = await ctx.guild.create_voice_channel(f"🔊 En vocal : {len([m for m in ctx.guild.members if m.voice and m.voice.channel])}", category=category)
@@ -1027,7 +1054,6 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.reply("❌ Argument manquant.")
     else:
-        # log unexpected errors to console for debugging
         print("Command error:", error)
 
 # Run
