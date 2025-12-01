@@ -3,7 +3,7 @@
 Discord bot converted from your Node.js bot.
 Features: prefix commands, interactive help, welcome/leave, tickets, role reacts,
 temp voice channels, moderation (ban/unban/timeout), config storage in JSON.
-Ready for hosting on Render as a Worker/Service (see README below).
+Ready for hosting on Render as a Worker/Service.
 """
 
 import os
@@ -14,8 +14,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 import discord
-from discord import Embed, ButtonStyle, SelectOption, Permissions
-from discord.ext import commands, tasks
+from discord import Embed, ButtonStyle, SelectOption
+from discord.ext import commands
 from discord.ui import View, Button, Select
 
 # Load .env if present
@@ -79,7 +79,7 @@ def get_gcfg(guild_id):
 def parse_duration(duration: str) -> Optional[int]:
     """
     Parse duration strings like 10s, 5m, 1h, 1d
-    Returns milliseconds (int) or None if invalid.
+    Returns seconds (int) or None if invalid.
     """
     if not duration:
         return None
@@ -98,14 +98,15 @@ async def send_log(guild: discord.Guild, embed: Embed):
     log_channel_id = gcfg.get("logChannel")
     if not log_channel_id:
         return
-    ch = guild.get_channel(int(log_channel_id))
-    if ch:
-        try:
+    try:
+        ch = guild.get_channel(int(log_channel_id))
+        if ch:
             await ch.send(embed=embed)
-        except Exception:
-            pass
+    except Exception:
+        # ignore logging errors
+        pass
 
-# --- Help menu view ---
+# --- Help menu view (persistent) ---
 class HelpSelect(Select):
     def __init__(self):
         options = [
@@ -116,7 +117,14 @@ class HelpSelect(Select):
             SelectOption(label="🔊 Vocaux Temporaires", value="voice"),
             SelectOption(label="⚙️ Configuration", value="config")
         ]
-        super().__init__(placeholder="Sélectionner une catégorie", min_values=1, max_values=1, options=options)
+        # custom_id is required for persistence
+        super().__init__(
+            placeholder="Sélectionner une catégorie",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="help_select"
+        )
 
     async def callback(self, interaction: discord.Interaction):
         val = self.values[0]
@@ -144,23 +152,29 @@ class HelpSelect(Select):
         else:
             embed = Embed(title="⚙️ Configuration", color=0x95a5a6)
             embed.description = "**!config** - menu interactif"
-        await interaction.response.edit_message(embed=embed, view=self.view)
+        # edit the original message that contains the select
+        try:
+            await interaction.response.edit_message(embed=embed, view=self.view)
+        except Exception:
+            # fallback: send ephemeral message
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class HelpView(View):
     def __init__(self):
+        # timeout=None to be persistent
         super().__init__(timeout=None)
         self.add_item(HelpSelect())
 
-# --- Ticket Button View ---
+# --- Ticket Button View (persistent) ---
 class TicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(Button(label="📩 Créer un Ticket", custom_id="create_ticket", style=ButtonStyle.primary))
+        # We rely on the decorator-defined button below (avoid duplicate add_item)
 
     @discord.ui.button(label="📩 Créer un Ticket", style=ButtonStyle.primary, custom_id="create_ticket")
     async def create_ticket(self, button: Button, interaction: discord.Interaction):
         gcfg = get_gcfg(interaction.guild.id)
-        # Check existing
+        # Check existing ticket by name
         existing = discord.utils.get(interaction.guild.text_channels, name=f"ticket-{interaction.user.name.lower()}")
         if existing:
             await interaction.response.send_message(f"❌ Vous avez déjà un ticket: {existing.mention}", ephemeral=True)
@@ -172,9 +186,10 @@ class TicketView(View):
                 interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             }
+            category_obj = interaction.guild.get_channel(int(category_id)) if category_id else None
             channel = await interaction.guild.create_text_channel(
                 name=f"ticket-{interaction.user.name}",
-                category=interaction.guild.get_channel(int(category_id)) if category_id else None,
+                category=category_obj,
                 overwrites=overwrites
             )
             # add support roles permissions
@@ -184,7 +199,7 @@ class TicketView(View):
                     await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
 
             embed = Embed(title="🎫 Nouveau Ticket", description=f"Bonjour {interaction.user.mention}, décris ton problème.", color=0x3498db)
-            close_view = View()
+            close_view = View(timeout=None)
             close_view.add_item(Button(label="🔒 Fermer le Ticket", custom_id=f"close_ticket_{channel.id}", style=ButtonStyle.danger))
             mentions = interaction.user.mention + (" " + " ".join(f"<@&{r}>" for r in gcfg.get("ticketRoles", [])) if gcfg.get("ticketRoles") else "")
             await channel.send(content=mentions, embed=embed, view=close_view)
@@ -192,34 +207,30 @@ class TicketView(View):
 
             log = Embed(title="🎫 Ticket Créé", description=f"**Créé par:** {interaction.user} \n**Salon:** {channel.mention}", color=0x3498db, timestamp=datetime.utcnow())
             await send_log(interaction.guild, log)
-        except Exception as e:
+        except Exception:
             await interaction.followup.send("❌ Erreur lors de la création du ticket.", ephemeral=True)
 
 # Close ticket buttons are handled in on_interaction
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    # Handle close ticket custom ids like close_ticket_<channelid>
-    if not interaction.type == discord.InteractionType.component:
+    # Only handle component interactions here
+    if interaction.type != discord.InteractionType.component:
         return
     cid = interaction.data.get("custom_id", "")
     if cid.startswith("close_ticket_"):
-        # Confirm closure view
-        confirm = View()
+        confirm = View(timeout=None)
         confirm.add_item(Button(label="✅ Confirmer", custom_id=f"confirm_close_{interaction.channel.id}", style=ButtonStyle.danger))
         confirm.add_item(Button(label="❌ Annuler", custom_id="cancel_close", style=ButtonStyle.secondary))
         await interaction.response.send_message(embed=Embed(title="❓ Confirmer la fermeture", description="Êtes-vous sûr de fermer ce ticket ?"), view=confirm, ephemeral=True)
         return
     if cid.startswith("confirm_close_"):
-        # delete channel after short note
         try:
             await interaction.response.edit_message(content="🔒 Fermeture du ticket...", embed=None, view=None)
         except Exception:
             pass
         try:
-            # log before deletion
             log = Embed(title="🔒 Ticket Fermé", description=f"**Fermé par:** {interaction.user}\n**Salon:** {interaction.channel.name}", timestamp=datetime.utcnow(), color=0xe74c3c)
             await send_log(interaction.guild, log)
-            # give a moment for message update then delete
             await asyncio.sleep(1.5)
             await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
         except Exception:
@@ -239,9 +250,12 @@ async def on_interaction(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     print(f"✅ Bot connecté en tant que {bot.user} (id: {bot.user.id})")
-    # Ensure persistent views
-    bot.add_view(HelpView())
-    bot.add_view(TicketView())
+    # Ensure persistent views (Select/button custom_id + timeout=None required)
+    try:
+        bot.add_view(HelpView())
+        bot.add_view(TicketView())
+    except Exception as e:
+        print("Erreur add_view:", e)
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -262,7 +276,15 @@ async def on_member_join(member: discord.Member):
         if ch:
             if gcfg.get("welcomeEmbed"):
                 we = gcfg["welcomeEmbed"]
-                embed = Embed(title=we.get("title", "Bienvenue!"), description=we.get("description", "").replace("{user}", member.mention).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count)), color=int(we.get("color", "0x2ecc71").replace("#", "0x"), 16))
+                try:
+                    color_val = int(we.get("color", "0x2ecc71").replace("#", "0x"), 16)
+                except Exception:
+                    color_val = 0x2ecc71
+                embed = Embed(
+                    title=we.get("title", "Bienvenue!"),
+                    description=we.get("description", "").replace("{user}", member.mention).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count)),
+                    color=color_val
+                )
                 try:
                     embed.set_thumbnail(url=member.display_avatar.url)
                 except Exception:
@@ -287,7 +309,15 @@ async def on_member_remove(member: discord.Member):
         if ch:
             if gcfg.get("leaveEmbed"):
                 le = gcfg["leaveEmbed"]
-                embed = Embed(title=le.get("title", "Au revoir!"), description=le.get("description", "").replace("{user}", member.name).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count)), color=int(le.get("color", "0xff0000").replace("#", "0x"), 16))
+                try:
+                    color_val = int(le.get("color", "0xff0000").replace("#", "0x"), 16)
+                except Exception:
+                    color_val = 0xff0000
+                embed = Embed(
+                    title=le.get("title", "Au revoir!"),
+                    description=le.get("description", "").replace("{user}", member.name).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count)),
+                    color=color_val
+                )
                 try:
                     embed.set_thumbnail(url=member.display_avatar.url)
                 except Exception:
@@ -314,7 +344,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
     entry = rr[msgid]
     emoji = entry.get("emoji")
-    # compare using name or id string (payload.emoji may have id or name)
     if (payload.emoji.id and str(payload.emoji.id) == str(emoji)) or (payload.emoji.name == emoji):
         guild = bot.get_guild(payload.guild_id)
         if not guild:
@@ -351,11 +380,14 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 # Temporary voice channels
 @bot.event
 async def on_voice_state_update(member, before, after):
+    # guard
+    if member.guild is None:
+        return
     gcfg = get_gcfg(member.guild.id)
     join_channel_id = gcfg.get("tempVocJoinChannel")
     temp_list = gcfg.get("tempVocChannels", [])
     # Create
-    if after.channel and str(after.channel.id) == str(join_channel_id) and (not before.channel or before.channel.id != after.channel.id):
+    if after.channel and join_channel_id and str(after.channel.id) == str(join_channel_id) and (not before.channel or before.channel.id != after.channel.id):
         try:
             category = member.guild.get_channel(int(gcfg.get("tempVocCategory"))) if gcfg.get("tempVocCategory") else None
             temp = await member.guild.create_voice_channel(name=f"🎤 {member.name}", category=category)
@@ -654,12 +686,9 @@ async def on_command_error(ctx, error):
         await ctx.reply("❌ Vous n'avez pas la permission d'utiliser cette commande.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.reply("❌ Argument manquant.")
-    # else: log or ignore
     else:
-        try:
-            raise error
-        except Exception as e:
-            print("Command error:", e)
+        # log unexpected errors to console for debugging
+        print("Command error:", error)
 
 # Run
 if __name__ == "__main__":
