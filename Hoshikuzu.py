@@ -20,7 +20,7 @@ import uvicorn
 from dotenv import load_dotenv
 import discord
 from discord import Embed, ButtonStyle, SelectOption
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import View, Button, Select
 
 # -------------------------
@@ -36,7 +36,7 @@ def run_webserver():
     # Render will set PORT environment variable; fallback to 10000
     port = int(os.environ.get("PORT", 10000))
     # uvicorn.run is blocking; run it in this thread
-    uvicorn.run("Hoshikuzu:app" if False else app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
 
 # We'll start the webserver thread later (after file load) to avoid import-time issues.
 # Start it as a daemon so the process exits cleanly with the bot.
@@ -98,7 +98,8 @@ def get_gcfg(guild_id):
             "tempVocCategory": None,
             "tempVocJoinChannel": None,
             "tempVocChannels": [],
-            "roleReacts": {}  # message_id -> {roleId, emoji}
+            "roleReacts": {},  # message_id -> {roleId, emoji}
+            "statsChannels": []  # ids for stats voice channels
         }
         save_config(config)
     return config[gid]
@@ -274,6 +275,51 @@ async def on_interaction(interaction: discord.Interaction):
                 pass
         return
 
+# === Stats updater task & command ===
+_stats_task = None
+_stats_task_lock = asyncio.Lock()
+
+async def stats_updater_loop():
+    """Background loop that updates stats channels every 60s for guilds with statsChannels configured."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            for guild in bot.guilds:
+                gcfg = get_gcfg(guild.id)
+                chan_ids = gcfg.get("statsChannels") or []
+                # Expecting 4 voice channel ids in order: members, bots, in_voice, total_channels
+                if len(chan_ids) < 4:
+                    continue
+                # fetch channels
+                channels = []
+                for cid in chan_ids:
+                    try:
+                        ch = guild.get_channel(int(cid))
+                        channels.append(ch)
+                    except Exception:
+                        channels.append(None)
+                members = guild.member_count
+                bots = len([m for m in guild.members if m.bot])
+                in_voice = len([m for m in guild.members if m.voice and m.voice.channel])
+                total_channels = len(guild.channels)
+                # update names if channel exists
+                try:
+                    if channels[0]:
+                        await channels[0].edit(name=f"👥 Membres : {members}")
+                    if channels[1]:
+                        await channels[1].edit(name=f"🤖 Bots : {bots}")
+                    if channels[2]:
+                        await channels[2].edit(name=f"🔊 En vocal : {in_voice}")
+                    if channels[3]:
+                        await channels[3].edit(name=f"📁 Salons : {total_channels}")
+                except Exception:
+                    # ignore per-guild update errors
+                    pass
+        except Exception:
+            # ignore global errors and continue
+            pass
+        await asyncio.sleep(60)
+
 # --- Events: ready, join/leave, reactions, voice state updates ---
 @bot.event
 async def on_ready():
@@ -284,6 +330,12 @@ async def on_ready():
         bot.add_view(TicketView())
     except Exception as e:
         print("Erreur add_view:", e)
+
+    # Start stats updater once
+    global _stats_task
+    async with _stats_task_lock:
+        if _stats_task is None:
+            _stats_task = bot.loop.create_task(stats_updater_loop())
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -656,7 +708,9 @@ async def cmd_config(ctx):
     embed = Embed(title="⚙️ Configuration du Bot", description="Sélectionnez ce que vous souhaitez configurer", color=0x3498db)
     view = View(timeout=60)
     select = Select(placeholder="Sélectionner une option", min_values=1, max_values=1, options=[
-        SelectOption(label="👋 Salon de Bienvenue", value="welcome_channel"),
+        SelectOption(label="👋 Salon de Bienvenue (channel)", value="welcome_channel"),
+        SelectOption(label="✉️ Message de Bienvenue (texte)", value="welcome_text"),
+        SelectOption(label="🖼️ Embed de Bienvenue", value="welcome_embed"),
         SelectOption(label="👋 Salon de Départ", value="leave_channel"),
         SelectOption(label="🎫 Catégorie Tickets", value="ticket_category"),
         SelectOption(label="📝 Salon de Logs", value="log_channel"),
@@ -667,45 +721,110 @@ async def cmd_config(ctx):
             await interaction.response.send_message("❌ Seul l'auteur de la commande peut répondre.", ephemeral=True)
             return
         opt = select.values[0]
-        await interaction.response.send_message(f"📝 Mentionnez le salon/role/catégorie pour **{opt}**:", ephemeral=True)
+        await interaction.response.send_message(f"📝 Mentionnez le salon/role/catégorie/texte pour **{opt}**:", ephemeral=True)
         def check(m):
             return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
         try:
-            msg = await bot.wait_for("message", check=check, timeout=30)
+            msg = await bot.wait_for("message", check=check, timeout=60)
         except asyncio.TimeoutError:
             await interaction.followup.send("❌ Temps écoulé.", ephemeral=True)
             return
         gcfg = get_gcfg(ctx.guild.id)
-        if opt.endswith("channel"):
+        # channels
+        if opt == "welcome_channel":
             ch = msg.channel_mentions[0] if msg.channel_mentions else None
             if ch:
-                if opt == "welcome_channel":
-                    gcfg["welcomeChannel"] = str(ch.id)
-                elif opt == "leave_channel":
-                    gcfg["leaveChannel"] = str(ch.id)
-                elif opt == "log_channel":
-                    gcfg["logChannel"] = str(ch.id)
+                gcfg["welcomeChannel"] = str(ch.id)
                 save_config(config)
-                await msg.reply(f"✅ Salon configuré: {ch.mention}")
+                await msg.reply(f"✅ Salon de bienvenue configuré: {ch.mention}")
                 return
-        if opt.endswith("category"):
+        if opt == "leave_channel":
+            ch = msg.channel_mentions[0] if msg.channel_mentions else None
+            if ch:
+                gcfg["leaveChannel"] = str(ch.id)
+                save_config(config)
+                await msg.reply(f"✅ Salon de départ configuré: {ch.mention}")
+                return
+        if opt == "log_channel":
+            ch = msg.channel_mentions[0] if msg.channel_mentions else None
+            if ch:
+                gcfg["logChannel"] = str(ch.id)
+                save_config(config)
+                await msg.reply(f"✅ Salon de logs configuré: {ch.mention}")
+                return
+        # ticket category
+        if opt == "ticket_category":
             cat = msg.channel_mentions[0] if msg.channel_mentions else None
             if cat and isinstance(cat, discord.channel.CategoryChannel):
                 gcfg["ticketCategory"] = str(cat.id)
                 save_config(config)
-                await msg.reply(f"✅ Catégorie configurée: {cat.name}")
+                await msg.reply(f"✅ Catégorie tickets configurée: {cat.name}")
                 return
-        if opt.endswith("role"):
+        # join role
+        if opt == "join_role":
             role = msg.role_mentions[0] if msg.role_mentions else None
             if role:
                 gcfg["joinRole"] = str(role.id)
                 save_config(config)
                 await msg.reply(f"✅ Rôle configuré: {role.mention}")
                 return
-        await msg.reply("❌ Élément invalide ou non trouvé.")
+        # welcome text
+        if opt == "welcome_text":
+            # take the message content raw as template
+            text = msg.content.strip()
+            if text:
+                gcfg["welcomeText"] = text
+                save_config(config)
+                await msg.reply("✅ Message de bienvenue (texte) configuré.")
+                return
+        # welcome embed (simple: title|description|#hexcolor) or accept JSON-ish? Keep simple:
+        if opt == "welcome_embed":
+            # Expect user to send: title | description | #hexcolor
+            parts = [p.strip() for p in msg.content.split("|")]
+            if len(parts) >= 2:
+                title = parts[0]
+                description = parts[1]
+                color = parts[2] if len(parts) >= 3 else "#00ff00"
+                gcfg["welcomeEmbed"] = {"title": title, "description": description, "color": color}
+                save_config(config)
+                await msg.reply(f"✅ Embed de bienvenue configuré (titre + description). Exemple de preview envoyé.")
+                # send preview
+                try:
+                    color_val = int(color.replace("#", "0x"), 16)
+                except Exception:
+                    color_val = 0x00ff00
+                preview = Embed(title=title, description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name).replace("{membercount}", str(ctx.guild.member_count)), color=color_val)
+                await ctx.channel.send(embed=preview)
+                return
+        await msg.reply("❌ Élément invalide ou non trouvé / format incorrect.")
     select.callback = select_callback
     view.add_item(select)
     await ctx.reply(embed=embed, view=view)
+
+# Command to create stats channels
+@bot.command(name="createstats")
+@commands.has_permissions(manage_channels=True)
+async def cmd_createstats(ctx):
+    gcfg = get_gcfg(ctx.guild.id)
+    # If already created, refuse
+    if gcfg.get("statsChannels"):
+        return await ctx.reply("❌ Les salons statistiques existent déjà sur ce serveur.")
+    # Create category
+    try:
+        category = discord.utils.get(ctx.guild.categories, name="📊・Statistiques")
+        if not category:
+            category = await ctx.guild.create_category("📊・Statistiques")
+        # create four voice channels (so they show on sidebar and we can edit their names)
+        ch1 = await ctx.guild.create_voice_channel(f"👥 Membres : {ctx.guild.member_count}", category=category)
+        ch2 = await ctx.guild.create_voice_channel(f"🤖 Bots : {len([m for m in ctx.guild.members if m.bot])}", category=category)
+        ch3 = await ctx.guild.create_voice_channel(f"🔊 En vocal : {len([m for m in ctx.guild.members if m.voice and m.voice.channel])}", category=category)
+        ch4 = await ctx.guild.create_voice_channel(f"📁 Salons : {len(ctx.guild.channels)}", category=category)
+        gcfg["statsChannels"] = [str(ch1.id), str(ch2.id), str(ch3.id), str(ch4.id)]
+        save_config(config)
+        await ctx.reply("✅ Salons statistiques créés.")
+    except Exception as e:
+        await ctx.reply("❌ Impossible de créer les salons statistiques.")
+        print("createstats error:", e)
 
 # Simple error handler
 @bot.event
