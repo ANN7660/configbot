@@ -1097,5 +1097,4 @@ node index.js
 
 🎉 Votre bot est maintenant opérationnel!
 */
-
 client.login('VOTRE_TOKEN_ICI');
