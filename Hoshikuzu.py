@@ -3,7 +3,7 @@
 Discord bot converted from your Node.js bot.
 Features: prefix commands, interactive help, welcome/leave, tickets, role reacts,
 temp voice channels, moderation (ban/unban/timeout), config storage in JSON.
-Ready for hosting on Render as a Worker/Service.
+Ready for hosting on Render as a Web Service (with FastAPI health endpoint).
 """
 
 import os
@@ -11,6 +11,11 @@ import json
 import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
+import threading
+
+# Web server imports (placed near top per your request - Option A)
+from fastapi import FastAPI
+import uvicorn
 
 from dotenv import load_dotenv
 import discord
@@ -18,6 +23,29 @@ from discord import Embed, ButtonStyle, SelectOption
 from discord.ext import commands
 from discord.ui import View, Button, Select
 
+# -------------------------
+# FastAPI web server (top)
+# -------------------------
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "discord-bot"}
+
+def run_webserver():
+    # Render will set PORT environment variable; fallback to 10000
+    port = int(os.environ.get("PORT", 10000))
+    # uvicorn.run is blocking; run it in this thread
+    uvicorn.run("Hoshikuzu:app" if False else app, host="0.0.0.0", port=port, log_level="info")
+
+# We'll start the webserver thread later (after file load) to avoid import-time issues.
+# Start it as a daemon so the process exits cleanly with the bot.
+web_thread = threading.Thread(target=run_webserver, daemon=True)
+web_thread.start()
+
+# -------------------------
+# Bot setup
+# -------------------------
 # Load .env if present
 load_dotenv()
 
