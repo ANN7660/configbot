@@ -1,1100 +1,666 @@
-// ======================================
-// BOT DISCORD COMPLET - PARTIE 1/2
-// ======================================
+#!/usr/bin/env python3
+"""
+Discord bot converted from your Node.js bot.
+Features: prefix commands, interactive help, welcome/leave, tickets, role reacts,
+temp voice channels, moderation (ban/unban/timeout), config storage in JSON.
+Ready for hosting on Render as a Worker/Service (see README below).
+"""
 
-const { 
-    Client, 
-    GatewayIntentBits, 
-    EmbedBuilder, 
-    ActionRowBuilder, 
-    ButtonBuilder, 
-    ButtonStyle, 
-    StringSelectMenuBuilder,
-    ChannelType,
-    PermissionFlagsBits,
-    ModalBuilder,
-    TextInputBuilder,
-    TextInputStyle
-} = require('discord.js');
-const fs = require('fs');
+import os
+import json
+import asyncio
+from datetime import datetime, timedelta
+from typing import Optional
 
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMessageReactions
-    ]
-});
+from dotenv import load_dotenv
+import discord
+from discord import Embed, ButtonStyle, SelectOption, Permissions
+from discord.ext import commands, tasks
+from discord.ui import View, Button, Select
 
-// Base de données JSON
-const DB_FILE = './config.json';
-let config = {};
+# Load .env if present
+load_dotenv()
 
-function loadConfig() {
-    if (fs.existsSync(DB_FILE)) {
-        config = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-    } else {
-        config = {};
-        saveConfig();
-    }
-}
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN environment variable is required.")
 
-function saveConfig() {
-    fs.writeFileSync(DB_FILE, JSON.stringify(config, null, 2));
-}
+# Constants
+DB_FILE = "config.json"
+PREFIX = "!"
 
-function getGuildConfig(guildId) {
-    if (!config[guildId]) {
-        config[guildId] = {
-            welcomeEmbed: null,
-            welcomeText: null,
-            leaveEmbed: null,
-            leaveText: null,
-            welcomeChannel: null,
-            leaveChannel: null,
-            ticketCategory: null,
-            ticketRoles: [],
-            ticketCounter: 0,
-            logChannel: null,
-            joinRole: null,
-            tempVocCategory: null,
-            tempVocChannels: []
-        };
-        saveConfig();
-    }
-    return config[guildId];
-}
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.reactions = True
+intents.guilds = True
+intents.voice_states = True
 
-client.once('ready', () => {
-    console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
-    loadConfig();
-});
+bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-// ======================================
-// COMMANDE !HELP
-// ======================================
-client.on('messageCreate', async message => {
-    if (message.author.bot || !message.content.startsWith('!')) return;
+# --- Simple JSON storage ---
+def load_config():
+    if not os.path.exists(DB_FILE):
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f, indent=2)
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    const args = message.content.slice(1).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
+def save_config(cfg):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
 
-    // !HELP
-    if (command === 'help') {
-        const embed = new EmbedBuilder()
-            .setTitle('📚 Menu d\'aide du Bot')
-            .setDescription('Sélectionnez une catégorie pour voir les commandes')
-            .setColor('#3498db')
-            .setTimestamp();
+config = load_config()
 
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new StringSelectMenuBuilder()
-                    .setCustomId('help_menu')
-                    .setPlaceholder('Sélectionner une catégorie')
-                    .addOptions([
-                        {
-                            label: '👋 Bienvenue & Départ',
-                            description: 'Messages de bienvenue et départ',
-                            value: 'welcome'
-                        },
-                        {
-                            label: '🎫 Système de Tickets',
-                            description: 'Gestion des tickets',
-                            value: 'tickets'
-                        },
-                        {
-                            label: '🛡️ Modération',
-                            description: 'Commandes de modération',
-                            value: 'moderation'
-                        },
-                        {
-                            label: '🎭 Rôles & Réactions',
-                            description: 'Gestion des rôles',
-                            value: 'roles'
-                        },
-                        {
-                            label: '🔊 Vocaux Temporaires',
-                            description: 'Salons vocaux temporaires',
-                            value: 'voice'
-                        },
-                        {
-                            label: '⚙️ Configuration',
-                            description: 'Configuration du bot',
-                            value: 'config'
-                        }
-                    ])
-            );
-
-        await message.reply({ embeds: [embed], components: [row] });
-    }
-
-    // !BVNTEXT - Message de bienvenue en texte
-    if (command === 'bvntext') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
+def get_gcfg(guild_id):
+    gid = str(guild_id)
+    if gid not in config:
+        config[gid] = {
+            "welcomeEmbed": None,
+            "welcomeText": None,
+            "leaveEmbed": None,
+            "leaveText": None,
+            "welcomeChannel": None,
+            "leaveChannel": None,
+            "ticketCategory": None,
+            "ticketRoles": [],
+            "ticketCounter": 0,
+            "logChannel": None,
+            "joinRole": None,
+            "tempVocCategory": None,
+            "tempVocJoinChannel": None,
+            "tempVocChannels": [],
+            "roleReacts": {}  # message_id -> {roleId, emoji}
         }
-
-        const text = args.join(' ');
-        if (!text) {
-            return message.reply('❌ Usage: `!bvntext <message>`\nVariables: `{user}` `{server}` `{membercount}`');
-        }
-
-        const guildConfig = getGuildConfig(message.guild.id);
-        guildConfig.welcomeText = text;
-        saveConfig();
-
-        message.reply('✅ Message de bienvenue (texte) configuré!\nExemple: ' + text.replace('{user}', message.author.toString()).replace('{server}', message.guild.name).replace('{membercount}', message.guild.memberCount));
-    }
-
-    // !BVNEMBED - Message de bienvenue en embed
-    if (command === 'bvnembed') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
-        }
-
-        const modal = new ModalBuilder()
-            .setCustomId('welcome_embed_modal')
-            .setTitle('Configuration Embed de Bienvenue');
-
-        // Comme on ne peut pas utiliser de modals avec les messages prefix, on va utiliser un système simple
-        const description = args.join(' ');
-        if (!description) {
-            return message.reply('❌ Usage: `!bvnembed <description>`\nVariables: `{user}` `{server}` `{membercount}`');
-        }
-
-        const guildConfig = getGuildConfig(message.guild.id);
-        guildConfig.welcomeEmbed = {
-            title: '👋 Bienvenue!',
-            description: description,
-            color: '#00ff00'
-        };
-        saveConfig();
-
-        const previewEmbed = new EmbedBuilder()
-            .setTitle(guildConfig.welcomeEmbed.title)
-            .setDescription(description.replace('{user}', message.author.toString()).replace('{server}', message.guild.name).replace('{membercount}', message.guild.memberCount))
-            .setColor(guildConfig.welcomeEmbed.color);
-
-        message.reply({ content: '✅ Embed de bienvenue configuré! Aperçu:', embeds: [previewEmbed] });
-    }
-
-    // !LEAVETEXT - Message de départ en texte
-    if (command === 'leavetxt') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
-        }
-
-        const text = args.join(' ');
-        if (!text) {
-            return message.reply('❌ Usage: `!leavetxt <message>`\nVariables: `{user}` `{server}` `{membercount}`');
-        }
-
-        const guildConfig = getGuildConfig(message.guild.id);
-        guildConfig.leaveText = text;
-        saveConfig();
-
-        message.reply('✅ Message de départ (texte) configuré!');
-    }
-
-    // !LEAVEEMBED - Message de départ en embed
-    if (command === 'leaveembed') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
-        }
-
-        const description = args.join(' ');
-        if (!description) {
-            return message.reply('❌ Usage: `!leaveembed <description>`\nVariables: `{user}` `{server}` `{membercount}`');
-        }
-
-        const guildConfig = getGuildConfig(message.guild.id);
-        guildConfig.leaveEmbed = {
-            title: '👋 Au revoir!',
-            description: description,
-            color: '#ff0000'
-        };
-        saveConfig();
-
-        message.reply('✅ Embed de départ configuré!');
-    }
-
-    // !TICKETPANEL - Créer le panel de tickets
-    if (command === 'ticketpanel') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
-        }
-
-        const embed = new EmbedBuilder()
-            .setTitle('🎫 Support Tickets')
-            .setDescription('Cliquez sur le bouton ci-dessous pour créer un ticket de support.\n\nNotre équipe vous répondra dès que possible!')
-            .setColor('#3498db')
-            .setTimestamp();
-
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId('create_ticket')
-                    .setLabel('📩 Créer un Ticket')
-                    .setStyle(ButtonStyle.Primary)
-            );
-
-        await message.channel.send({ embeds: [embed], components: [row] });
-        message.delete().catch(() => {});
-    }
-
-    // !TICKETROLE - Ajouter un rôle à mentionner dans les tickets
-    if (command === 'ticketrole') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
-        }
-
-        const role = message.mentions.roles.first();
-        if (!role) {
-            return message.reply('❌ Usage: `!ticketrole @role`');
-        }
-
-        const guildConfig = getGuildConfig(message.guild.id);
-        if (guildConfig.ticketRoles.includes(role.id)) {
-            return message.reply('❌ Ce rôle est déjà dans la liste des rôles de ticket.');
-        }
-
-        guildConfig.ticketRoles.push(role.id);
-        saveConfig();
-
-        message.reply(`✅ Le rôle ${role} sera maintenant mentionné dans les nouveaux tickets.`);
-    }
-
-    // !BAN
-    if (command === 'ban') {
-        if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) {
-            return message.reply('❌ Vous n\'avez pas la permission de bannir des membres.');
-        }
-
-        const user = message.mentions.users.first();
-        if (!user) {
-            return message.reply('❌ Usage: `!ban @utilisateur [raison]`');
-        }
-
-        const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
-
-        try {
-            await message.guild.members.ban(user, { reason });
-            
-            const embed = new EmbedBuilder()
-                .setTitle('🔨 Membre Banni')
-                .setDescription(`**Membre:** ${user.tag}\n**Raison:** ${reason}\n**Modérateur:** ${message.author.tag}`)
-                .setColor('#e74c3c')
-                .setTimestamp();
-
-            message.reply({ embeds: [embed] });
-            logAction(message.guild.id, embed);
-        } catch (error) {
-            message.reply('❌ Impossible de bannir cet utilisateur.');
-        }
-    }
-
-    // !UNBAN
-    if (command === 'unban') {
-        if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) {
-            return message.reply('❌ Vous n\'avez pas la permission de débannir des membres.');
-        }
-
-        const userId = args[0];
-        if (!userId) {
-            return message.reply('❌ Usage: `!unban <ID utilisateur>`');
-        }
-
-        try {
-            await message.guild.members.unban(userId);
-            message.reply(`✅ L'utilisateur avec l'ID \`${userId}\` a été débanni.`);
-        } catch (error) {
-            message.reply('❌ Impossible de débannir cet utilisateur.');
-        }
-    }
-
-    // !MUTE - Timeout temporaire
-    if (command === 'mute') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-            return message.reply('❌ Vous n\'avez pas la permission de mute des membres.');
-        }
-
-        const member = message.mentions.members.first();
-        const duration = args[1];
-        const reason = args.slice(2).join(' ') || 'Aucune raison fournie';
-
-        if (!member || !duration) {
-            return message.reply('❌ Usage: `!mute @membre <durée> [raison]`\nExemples de durée: 10m, 1h, 1d');
-        }
-
-        const time = parseDuration(duration);
-        if (!time) {
-            return message.reply('❌ Durée invalide. Utilisez: 10m, 1h, 1d, etc.');
-        }
-
-        try {
-            await member.timeout(time, reason);
-            
-            const embed = new EmbedBuilder()
-                .setTitle('🔇 Membre Mute')
-                .setDescription(`**Membre:** ${member.user.tag}\n**Durée:** ${duration}\n**Raison:** ${reason}\n**Modérateur:** ${message.author.tag}`)
-                .setColor('#e67e22')
-                .setTimestamp();
-
-            message.reply({ embeds: [embed] });
-            logAction(message.guild.id, embed);
-        } catch (error) {
-            message.reply('❌ Impossible de mute ce membre.');
-        }
-    }
-
-    // !UNMUTE
-    if (command === 'unmute') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-            return message.reply('❌ Vous n\'avez pas la permission de unmute des membres.');
-        }
-
-        const member = message.mentions.members.first();
-        if (!member) {
-            return message.reply('❌ Usage: `!unmute @membre`');
-        }
-
-        try {
-            await member.timeout(null);
-            message.reply(`✅ ${member.user.tag} a été unmute.`);
-        } catch (error) {
-            message.reply('❌ Impossible de unmute ce membre.');
-        }
-    }
-});
-
-// Fonction pour parser la durée
-function parseDuration(duration) {
-    const match = duration.match(/^(\d+)([smhd])$/);
-    if (!match) return null;
-
-    const value = parseInt(match[1]);
-    const unit = match[2];
-
-    const multipliers = {
-        s: 1000,
-        m: 60000,
-        h: 3600000,
-        d: 86400000
-    };
-
-    return value * multipliers[unit];
-}
-
-// Fonction de log
-async function logAction(guildId, embed) {
-    const guildConfig = getGuildConfig(guildId);
-    if (!guildConfig.logChannel) return;
-
-    const guild = client.guilds.cache.get(guildId);
-    const channel = guild.channels.cache.get(guildConfig.logChannel);
-    if (channel) {
-        await channel.send({ embeds: [embed] });
-    }
-}
-
-// Événement membre rejoins
-client.on('guildMemberAdd', async member => {
-    const guildConfig = getGuildConfig(member.guild.id);
-
-    // Ajouter le rôle de bienvenue
-    if (guildConfig.joinRole) {
-        try {
-            const role = member.guild.roles.cache.get(guildConfig.joinRole);
-            if (role) await member.roles.add(role);
-        } catch (error) {
-            console.error('Erreur lors de l\'ajout du rôle:', error);
-        }
-    }
-
-    // Envoyer le message de bienvenue
-    if (guildConfig.welcomeChannel) {
-        const channel = member.guild.channels.cache.get(guildConfig.welcomeChannel);
-        if (!channel) return;
-
-        if (guildConfig.welcomeEmbed) {
-            const embed = new EmbedBuilder()
-                .setTitle(guildConfig.welcomeEmbed.title)
-                .setDescription(
-                    guildConfig.welcomeEmbed.description
-                        .replace('{user}', member.toString())
-                        .replace('{server}', member.guild.name)
-                        .replace('{membercount}', member.guild.memberCount)
-                )
-                .setColor(guildConfig.welcomeEmbed.color)
-                .setThumbnail(member.user.displayAvatarURL())
-                .setTimestamp();
-
-            await channel.send({ embeds: [embed] });
-        }
-
-        if (guildConfig.welcomeText) {
-            const text = guildConfig.welcomeText
-                .replace('{user}', member.toString())
-                .replace('{server}', member.guild.name)
-                .replace('{membercount}', member.guild.memberCount);
-
-            await channel.send(text);
-        }
-    }
-
-    // Log
-    const logEmbed = new EmbedBuilder()
-        .setTitle('📥 Membre Rejoint')
-        .setDescription(`**Membre:** ${member.user.tag}\n**ID:** ${member.id}\n**Compte créé:** <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`)
-        .setColor('#2ecc71')
-        .setThumbnail(member.user.displayAvatarURL())
-        .setTimestamp();
-
-    logAction(member.guild.id, logEmbed);
-});
-
-// Suite dans la partie 2...
-// ======================================
-// BOT DISCORD COMPLET - PARTIE 2/2
-// ======================================
-// Suite du code de la partie 1...
-
-// Événement membre quitte
-client.on('guildMemberRemove', async member => {
-    const guildConfig = getGuildConfig(member.guild.id);
-
-    // Envoyer le message de départ
-    if (guildConfig.leaveChannel) {
-        const channel = member.guild.channels.cache.get(guildConfig.leaveChannel);
-        if (!channel) return;
-
-        if (guildConfig.leaveEmbed) {
-            const embed = new EmbedBuilder()
-                .setTitle(guildConfig.leaveEmbed.title)
-                .setDescription(
-                    guildConfig.leaveEmbed.description
-                        .replace('{user}', member.user.tag)
-                        .replace('{server}', member.guild.name)
-                        .replace('{membercount}', member.guild.memberCount)
-                )
-                .setColor(guildConfig.leaveEmbed.color)
-                .setThumbnail(member.user.displayAvatarURL())
-                .setTimestamp();
-
-            await channel.send({ embeds: [embed] });
-        }
-
-        if (guildConfig.leaveText) {
-            const text = guildConfig.leaveText
-                .replace('{user}', member.user.tag)
-                .replace('{server}', member.guild.name)
-                .replace('{membercount}', member.guild.memberCount);
-
-            await channel.send(text);
-        }
-    }
-
-    // Log
-    const logEmbed = new EmbedBuilder()
-        .setTitle('📤 Membre Parti')
-        .setDescription(`**Membre:** ${member.user.tag}\n**ID:** ${member.id}`)
-        .setColor('#e74c3c')
-        .setThumbnail(member.user.displayAvatarURL())
-        .setTimestamp();
-
-    logAction(member.guild.id, logEmbed);
-});
-
-// Suite des commandes
-client.on('messageCreate', async message => {
-    if (message.author.bot || !message.content.startsWith('!')) return;
-
-    const args = message.content.slice(1).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-
-    // !LOCK - Verrouiller un salon
-    if (command === 'lock') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ Vous n\'avez pas la permission de gérer les salons.');
-        }
-
-        await message.channel.permissionOverwrites.edit(message.guild.id, {
-            SendMessages: false
-        });
-
-        message.reply('🔒 Salon verrouillé! Seuls les modérateurs peuvent écrire.');
-    }
-
-    // !UNLOCK - Déverrouiller un salon
-    if (command === 'unlock') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ Vous n\'avez pas la permission de gérer les salons.');
-        }
-
-        await message.channel.permissionOverwrites.edit(message.guild.id, {
-            SendMessages: null
-        });
-
-        message.reply('🔓 Salon déverrouillé!');
-    }
-
-    // !MODLENT - Activer le mode lent
-    if (command === 'modlent') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ Vous n\'avez pas la permission de gérer les salons.');
-        }
-
-        const seconds = parseInt(args[0]) || 5;
-        if (seconds < 0 || seconds > 21600) {
-            return message.reply('❌ Le délai doit être entre 0 et 21600 secondes (6 heures).');
-        }
-
-        await message.channel.setRateLimitPerUser(seconds);
-        message.reply(`🐌 Mode lent activé: ${seconds} secondes entre chaque message.`);
-    }
-
-    // !MODERAPIDE - Désactiver le mode lent
-    if (command === 'moderapide') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ Vous n\'avez pas la permission de gérer les salons.');
-        }
-
-        await message.channel.setRateLimitPerUser(0);
-        message.reply('⚡ Mode lent désactivé!');
-    }
-
-    // !ROLEREACT - Créer un role reaction
-    if (command === 'rolereact') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
-            return message.reply('❌ Vous n\'avez pas la permission de gérer les rôles.');
-        }
-
-        const role = message.mentions.roles.first();
-        const emoji = args[1];
-        const description = args.slice(2).join(' ') || 'Réagissez pour obtenir ce rôle!';
-
-        if (!role || !emoji) {
-            return message.reply('❌ Usage: `!rolereact @role <emoji> [description]`');
-        }
-
-        const embed = new EmbedBuilder()
-            .setTitle('🎭 Rôles Réactifs')
-            .setDescription(`${emoji} - ${role}\n\n${description}`)
-            .setColor('#9b59b6')
-            .setTimestamp();
-
-        const msg = await message.channel.send({ embeds: [embed] });
-        await msg.react(emoji);
-
-        // Sauvegarder le message pour le système de réaction
-        const guildConfig = getGuildConfig(message.guild.id);
-        if (!guildConfig.roleReacts) guildConfig.roleReacts = {};
-        guildConfig.roleReacts[msg.id] = { roleId: role.id, emoji: emoji };
-        saveConfig();
-
-        message.delete().catch(() => {});
-    }
-
-    // !CREATEVOC - Créer un système de vocal temporaire
-    if (command === 'createvoc') {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            return message.reply('❌ Vous n\'avez pas la permission de gérer les salons.');
-        }
-
-        try {
-            // Créer une catégorie si elle n'existe pas
-            let category = message.guild.channels.cache.find(
-                c => c.name === '🔊 Vocaux Temporaires' && c.type === ChannelType.GuildCategory
-            );
-
-            if (!category) {
-                category = await message.guild.channels.create({
-                    name: '🔊 Vocaux Temporaires',
-                    type: ChannelType.GuildCategory
-                });
+        save_config(config)
+    return config[gid]
+
+# --- Utilities ---
+def parse_duration(duration: str) -> Optional[int]:
+    """
+    Parse duration strings like 10s, 5m, 1h, 1d
+    Returns milliseconds (int) or None if invalid.
+    """
+    if not duration:
+        return None
+    unit = duration[-1]
+    try:
+        value = int(duration[:-1])
+    except ValueError:
+        return None
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if unit not in multipliers:
+        return None
+    return value * multipliers[unit]
+
+async def send_log(guild: discord.Guild, embed: Embed):
+    gcfg = get_gcfg(guild.id)
+    log_channel_id = gcfg.get("logChannel")
+    if not log_channel_id:
+        return
+    ch = guild.get_channel(int(log_channel_id))
+    if ch:
+        try:
+            await ch.send(embed=embed)
+        except Exception:
+            pass
+
+# --- Help menu view ---
+class HelpSelect(Select):
+    def __init__(self):
+        options = [
+            SelectOption(label="👋 Bienvenue & Départ", value="welcome"),
+            SelectOption(label="🎫 Tickets", value="tickets"),
+            SelectOption(label="🛡️ Modération", value="moderation"),
+            SelectOption(label="🎭 Rôles & Réactions", value="roles"),
+            SelectOption(label="🔊 Vocaux Temporaires", value="voice"),
+            SelectOption(label="⚙️ Configuration", value="config")
+        ]
+        super().__init__(placeholder="Sélectionner une catégorie", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        val = self.values[0]
+        if val == "welcome":
+            embed = Embed(title="👋 Bienvenue & Départ", color=0x2ecc71)
+            embed.description = (
+                "**!bvntext** `<message>`\n"
+                "**!bvnembed** `<description>`\n"
+                "**!leavetxt** `<message>`\n"
+                "**!leaveembed** `<description>`\n\n"
+                "Variables: `{user}` `{server}` `{membercount}`"
+            )
+        elif val == "tickets":
+            embed = Embed(title="🎫 Tickets", color=0x3498db)
+            embed.description = "**!ticketpanel** - créer panel\n**!ticketrole** @role - ajouter rôle ticket"
+        elif val == "moderation":
+            embed = Embed(title="🛡️ Modération", color=0xe74c3c)
+            embed.description = "**!ban** `@user [raison]`\n**!unban** `<id>`\n**!mute** `@user <durée> [raison]`\n**!unmute** `@user`"
+        elif val == "roles":
+            embed = Embed(title="🎭 Rôles & Réactions", color=0x9b59b6)
+            embed.description = "**!rolereact** `@role <emoji>`\n**!joinrole** `@role`"
+        elif val == "voice":
+            embed = Embed(title="🔊 Vocaux Temporaires", color=0xf39c12)
+            embed.description = "**!createvoc** - créer système join-to-create"
+        else:
+            embed = Embed(title="⚙️ Configuration", color=0x95a5a6)
+            embed.description = "**!config** - menu interactif"
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+class HelpView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(HelpSelect())
+
+# --- Ticket Button View ---
+class TicketView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(Button(label="📩 Créer un Ticket", custom_id="create_ticket", style=ButtonStyle.primary))
+
+    @discord.ui.button(label="📩 Créer un Ticket", style=ButtonStyle.primary, custom_id="create_ticket")
+    async def create_ticket(self, button: Button, interaction: discord.Interaction):
+        gcfg = get_gcfg(interaction.guild.id)
+        # Check existing
+        existing = discord.utils.get(interaction.guild.text_channels, name=f"ticket-{interaction.user.name.lower()}")
+        if existing:
+            await interaction.response.send_message(f"❌ Vous avez déjà un ticket: {existing.mention}", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            category_id = gcfg.get("ticketCategory")
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             }
-
-            // Créer le salon "Rejoindre pour créer"
-            const joinChannel = await message.guild.channels.create({
-                name: '➕ Rejoindre pour créer',
-                type: ChannelType.GuildVoice,
-                parent: category.id
-            });
-
-            const guildConfig = getGuildConfig(message.guild.id);
-            guildConfig.tempVocCategory = category.id;
-            guildConfig.tempVocJoinChannel = joinChannel.id;
-            saveConfig();
-
-            message.reply('✅ Système de vocal temporaire créé! Rejoignez le salon pour créer votre propre vocal.');
-        } catch (error) {
-            message.reply('❌ Erreur lors de la création du système de vocal temporaire.');
-        }
-    }
-
-    // !JOINROLE - Définir le rôle des nouveaux membres
-    if (command === 'joinrole') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
-        }
-
-        const role = message.mentions.roles.first();
-        if (!role) {
-            return message.reply('❌ Usage: `!joinrole @role`');
-        }
-
-        const guildConfig = getGuildConfig(message.guild.id);
-        guildConfig.joinRole = role.id;
-        saveConfig();
-
-        message.reply(`✅ Le rôle ${role} sera maintenant donné aux nouveaux membres.`);
-    }
-
-    // !CONFIG - Configuration interactive
-    if (command === 'config') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
-        }
-
-        const embed = new EmbedBuilder()
-            .setTitle('⚙️ Configuration du Bot')
-            .setDescription('Sélectionnez ce que vous souhaitez configurer')
-            .setColor('#3498db')
-            .setTimestamp();
-
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new StringSelectMenuBuilder()
-                    .setCustomId('config_menu')
-                    .setPlaceholder('Sélectionner une option')
-                    .addOptions([
-                        {
-                            label: '👋 Salon de Bienvenue',
-                            description: 'Définir le salon des messages de bienvenue',
-                            value: 'welcome_channel',
-                            emoji: '👋'
-                        },
-                        {
-                            label: '👋 Salon de Départ',
-                            description: 'Définir le salon des messages de départ',
-                            value: 'leave_channel',
-                            emoji: '👋'
-                        },
-                        {
-                            label: '🎫 Catégorie Tickets',
-                            description: 'Définir la catégorie pour les tickets',
-                            value: 'ticket_category',
-                            emoji: '🎫'
-                        },
-                        {
-                            label: '📝 Salon de Logs',
-                            description: 'Définir le salon des logs',
-                            value: 'log_channel',
-                            emoji: '📝'
-                        },
-                        {
-                            label: '👤 Rôle Nouveaux Membres',
-                            description: 'Définir le rôle des nouveaux membres',
-                            value: 'join_role',
-                            emoji: '👤'
-                        }
-                    ])
-            );
-
-        await message.reply({ embeds: [embed], components: [row] });
-    }
-});
-
-// Gestion des menus de sélection
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isStringSelectMenu()) return;
-
-    // Menu d'aide
-    if (interaction.customId === 'help_menu') {
-        const category = interaction.values[0];
-        let embed;
-
-        switch (category) {
-            case 'welcome':
-                embed = new EmbedBuilder()
-                    .setTitle('👋 Commandes de Bienvenue & Départ')
-                    .setDescription(
-                        '**!bvntext** `<message>` - Message de bienvenue en texte\n' +
-                        '**!bvnembed** `<description>` - Message de bienvenue en embed\n' +
-                        '**!leavetxt** `<message>` - Message de départ en texte\n' +
-                        '**!leaveembed** `<description>` - Message de départ en embed\n\n' +
-                        '**Variables disponibles:**\n' +
-                        '`{user}` - Mention du membre\n' +
-                        '`{server}` - Nom du serveur\n' +
-                        '`{membercount}` - Nombre de membres'
-                    )
-                    .setColor('#2ecc71');
-                break;
-
-            case 'tickets':
-                embed = new EmbedBuilder()
-                    .setTitle('🎫 Commandes de Tickets')
-                    .setDescription(
-                        '**!ticketpanel** - Créer un panel de tickets\n' +
-                        '**!ticketrole** `@role` - Ajouter un rôle à mentionner dans les tickets'
-                    )
-                    .setColor('#3498db');
-                break;
-
-            case 'moderation':
-                embed = new EmbedBuilder()
-                    .setTitle('🛡️ Commandes de Modération')
-                    .setDescription(
-                        '**!ban** `@membre [raison]` - Bannir un membre\n' +
-                        '**!unban** `<ID> [raison]` - Débannir un membre\n' +
-                        '**!mute** `@membre <durée> [raison]` - Mute temporaire\n' +
-                        '**!unmute** `@membre` - Unmute un membre\n' +
-                        '**!lock** - Verrouiller le salon\n' +
-                        '**!unlock** - Déverrouiller le salon\n' +
-                        '**!modlent** `<secondes>` - Activer le mode lent\n' +
-                        '**!moderapide** - Désactiver le mode lent\n\n' +
-                        '**Durées:** 10s, 5m, 1h, 1d'
-                    )
-                    .setColor('#e74c3c');
-                break;
-
-            case 'roles':
-                embed = new EmbedBuilder()
-                    .setTitle('🎭 Commandes de Rôles')
-                    .setDescription(
-                        '**!rolereact** `@role <emoji> [description]` - Créer un rôle réactif\n' +
-                        '**!joinrole** `@role` - Rôle automatique pour nouveaux membres'
-                    )
-                    .setColor('#9b59b6');
-                break;
-
-            case 'voice':
-                embed = new EmbedBuilder()
-                    .setTitle('🔊 Vocaux Temporaires')
-                    .setDescription(
-                        '**!createvoc** - Créer le système de vocaux temporaires\n\n' +
-                        'Les membres peuvent rejoindre le salon "Rejoindre pour créer" et un vocal temporaire sera créé à leur nom. ' +
-                        'Le salon se supprime automatiquement quand il est vide.'
-                    )
-                    .setColor('#f39c12');
-                break;
-
-            case 'config':
-                embed = new EmbedBuilder()
-                    .setTitle('⚙️ Commandes de Configuration')
-                    .setDescription(
-                        '**!config** - Menu de configuration interactif\n' +
-                        '**!help** - Afficher ce menu d\'aide\n\n' +
-                        'Utilisez !config pour définir les salons et paramètres du bot.'
-                    )
-                    .setColor('#95a5a6');
-                break;
-        }
-
-        await interaction.update({ embeds: [embed] });
-    }
-
-    // Menu de configuration
-    if (interaction.customId === 'config_menu') {
-        const option = interaction.values[0];
-        const guildConfig = getGuildConfig(interaction.guild.id);
-
-        await interaction.reply({
-            content: `📝 Mentionnez le salon/rôle/catégorie pour **${option.replace('_', ' ')}** dans les 30 prochaines secondes:`,
-            ephemeral: true
-        });
-
-        const filter = m => m.author.id === interaction.user.id;
-        const collector = interaction.channel.createMessageCollector({ filter, time: 30000, max: 1 });
-
-        collector.on('collect', async m => {
-            let target;
-
-            if (option.includes('channel')) {
-                target = m.mentions.channels.first();
-                if (target) {
-                    if (option === 'welcome_channel') guildConfig.welcomeChannel = target.id;
-                    if (option === 'leave_channel') guildConfig.leaveChannel = target.id;
-                    if (option === 'log_channel') guildConfig.logChannel = target.id;
-                    saveConfig();
-                    await m.reply(`✅ Salon configuré: ${target}`);
-                }
-            } else if (option.includes('category')) {
-                target = m.mentions.channels.first();
-                if (target && target.type === ChannelType.GuildCategory) {
-                    guildConfig.ticketCategory = target.id;
-                    saveConfig();
-                    await m.reply(`✅ Catégorie configurée: ${target.name}`);
-                }
-            } else if (option.includes('role')) {
-                target = m.mentions.roles.first();
-                if (target) {
-                    guildConfig.joinRole = target.id;
-                    saveConfig();
-                    await m.reply(`✅ Rôle configuré: ${target}`);
-                }
-            }
-
-            if (!target) {
-                await m.reply('❌ Élément invalide ou non trouvé.');
-            }
-        });
-    }
-});
-
-// Gestion des boutons
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isButton()) return;
-
-    // Bouton créer un ticket
-    if (interaction.customId === 'create_ticket') {
-        const guildConfig = getGuildConfig(interaction.guild.id);
-        
-        // Vérifier si l'utilisateur a déjà un ticket ouvert
-        const existingTicket = interaction.guild.channels.cache.find(
-            c => c.name === `ticket-${interaction.user.username.toLowerCase()}` && c.type === ChannelType.GuildText
-        );
-
-        if (existingTicket) {
-            return interaction.reply({ content: `❌ Vous avez déjà un ticket ouvert: ${existingTicket}`, ephemeral: true });
-        }
-
-        await interaction.deferReply({ ephemeral: true });
-
-        try {
-            // Créer le salon de ticket
-            const ticketChannel = await interaction.guild.channels.create({
-                name: `ticket-${interaction.user.username}`,
-                type: ChannelType.GuildText,
-                parent: guildConfig.ticketCategory,
-                permissionOverwrites: [
-                    {
-                        id: interaction.guild.id,
-                        deny: [PermissionFlagsBits.ViewChannel]
-                    },
-                    {
-                        id: interaction.user.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-                    }
-                ]
-            });
-
-            // Ajouter les permissions pour les rôles de support
-            for (const roleId of guildConfig.ticketRoles) {
-                await ticketChannel.permissionOverwrites.create(roleId, {
-                    ViewChannel: true,
-                    SendMessages: true,
-                    ReadMessageHistory: true
-                });
-            }
-
-            // Message dans le ticket
-            const ticketEmbed = new EmbedBuilder()
-                .setTitle('🎫 Nouveau Ticket')
-                .setDescription(
-                    `Bienvenue ${interaction.user}!\n\n` +
-                    `Notre équipe va vous répondre dès que possible.\n` +
-                    `Décrivez votre problème ou votre question en détail.`
-                )
-                .setColor('#3498db')
-                .setTimestamp();
-
-            const closeButton = new ActionRowBuilder()
-                .addComponents(
-                    new ButtonBuilder()
-                        .setCustomId('close_ticket')
-                        .setLabel('🔒 Fermer le Ticket')
-                        .setStyle(ButtonStyle.Danger)
-                );
-
-            // Mention des rôles
-            let mentions = `${interaction.user}`;
-            for (const roleId of guildConfig.ticketRoles) {
-                mentions += ` <@&${roleId}>`;
-            }
-
-            await ticketChannel.send({ content: mentions, embeds: [ticketEmbed], components: [closeButton] });
-
-            await interaction.editReply({ content: `✅ Ticket créé: ${ticketChannel}` });
-
-            // Log
-            const logEmbed = new EmbedBuilder()
-                .setTitle('🎫 Ticket Créé')
-                .setDescription(`**Créé par:** ${interaction.user.tag}\n**Salon:** ${ticketChannel}`)
-                .setColor('#3498db')
-                .setTimestamp();
-
-            logAction(interaction.guild.id, logEmbed);
-        } catch (error) {
-            console.error(error);
-            await interaction.editReply({ content: '❌ Erreur lors de la création du ticket.' });
-        }
-    }
-
-    // Bouton fermer le ticket
-    if (interaction.customId === 'close_ticket') {
-        const embed = new EmbedBuilder()
-            .setTitle('❓ Confirmer la Fermeture')
-            .setDescription('Êtes-vous sûr de vouloir fermer ce ticket?')
-            .setColor('#e74c3c');
-
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId('confirm_close')
-                    .setLabel('✅ Confirmer')
-                    .setStyle(ButtonStyle.Danger),
-                new ButtonBuilder()
-                    .setCustomId('cancel_close')
-                    .setLabel('❌ Annuler')
-                    .setStyle(ButtonStyle.Secondary)
-            );
-
-        await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
-    }
-
-    if (interaction.customId === 'confirm_close') {
-        await interaction.update({ content: '🔒 Fermeture du ticket...', embeds: [], components: [] });
-        
-        setTimeout(async () => {
-            await interaction.channel.delete();
-        }, 3000);
-
-        // Log
-        const logEmbed = new EmbedBuilder()
-            .setTitle('🔒 Ticket Fermé')
-            .setDescription(`**Fermé par:** ${interaction.user.tag}\n**Salon:** ${interaction.channel.name}`)
-            .setColor('#e74c3c')
-            .setTimestamp();
-
-        logAction(interaction.guild.id, logEmbed);
-    }
-
-    if (interaction.customId === 'cancel_close') {
-        await interaction.update({ content: '✅ Fermeture annulée.', embeds: [], components: [] });
-    }
-});
-
-// Système de rôles réactifs
-client.on('messageReactionAdd', async (reaction, user) => {
-    if (user.bot) return;
-    if (reaction.partial) await reaction.fetch();
-
-    const guildConfig = getGuildConfig(reaction.message.guild.id);
-    if (!guildConfig.roleReacts || !guildConfig.roleReacts[reaction.message.id]) return;
-
-    const roleReact = guildConfig.roleReacts[reaction.message.id];
-    if (reaction.emoji.name !== roleReact.emoji && reaction.emoji.id !== roleReact.emoji) return;
-
-    const member = await reaction.message.guild.members.fetch(user.id);
-    const role = reaction.message.guild.roles.cache.get(roleReact.roleId);
-
-    if (role) {
-        await member.roles.add(role);
-    }
-});
-
-client.on('messageReactionRemove', async (reaction, user) => {
-    if (user.bot) return;
-    if (reaction.partial) await reaction.fetch();
-
-    const guildConfig = getGuildConfig(reaction.message.guild.id);
-    if (!guildConfig.roleReacts || !guildConfig.roleReacts[reaction.message.id]) return;
-
-    const roleReact = guildConfig.roleReacts[reaction.message.id];
-    if (reaction.emoji.name !== roleReact.emoji && reaction.emoji.id !== roleReact.emoji) return;
-
-    const member = await reaction.message.guild.members.fetch(user.id);
-    const role = reaction.message.guild.roles.cache.get(roleReact.roleId);
-
-    if (role) {
-        await member.roles.remove(role);
-    }
-});
-
-// Système de vocaux temporaires
-client.on('voiceStateUpdate', async (oldState, newState) => {
-    const guildConfig = getGuildConfig(newState.guild.id);
-    if (!guildConfig.tempVocJoinChannel) return;
-
-    // Rejoindre le salon "Rejoindre pour créer"
-    if (newState.channelId === guildConfig.tempVocJoinChannel && !oldState.channelId) {
-        try {
-            const tempChannel = await newState.guild.channels.create({
-                name: `🎤 ${newState.member.user.username}`,
-                type: ChannelType.GuildVoice,
-                parent: guildConfig.tempVocCategory,
-                permissionOverwrites: [
-                    {
-                        id: newState.member.id,
-                        allow: [PermissionFlagsBits.ManageChannels, PermissionFlagsBits.MoveMembers]
-                    }
-                ]
-            });
-
-            await newState.member.voice.setChannel(tempChannel);
-
-            if (!guildConfig.tempVocChannels) guildConfig.tempVocChannels = [];
-            guildConfig.tempVocChannels.push(tempChannel.id);
-            saveConfig();
-        } catch (error) {
-            console.error('Erreur création vocal temporaire:', error);
-        }
-    }
-
-    // Supprimer les vocaux vides
-    if (oldState.channel && guildConfig.tempVocChannels && guildConfig.tempVocChannels.includes(oldState.channelId)) {
-        if (oldState.channel.members.size === 0) {
-            try {
-                await oldState.channel.delete();
-                guildConfig.tempVocChannels = guildConfig.tempVocChannels.filter(id => id !== oldState.channelId);
-                saveConfig();
-            } catch (error) {
-                console.error('Erreur suppression vocal:', error);
-            }
-        }
-    }
-});
-
-// ======================================
-// INSTRUCTIONS D'INSTALLATION
-// ======================================
-/*
-1. Créer un fichier package.json avec:
-{
-  "name": "bot-discord-complet",
-  "version": "1.0.0",
-  "main": "index.js",
-  "dependencies": {
-    "discord.js": "^14.14.1"
-  }
-}
-
-2. Installer les dépendances:
-npm install
-
-3. Remplacer 'VOTRE_TOKEN_ICI' par votre token de bot Discord
-
-4. Lancer le bot:
-node index.js
-
-5. Inviter le bot avec ces permissions:
-- Gérer les rôles
-- Gérer les salons
-- Bannir des membres
-- Expulser des membres
-- Gérer les messages
-- Lire les messages
-- Envoyer des messages
-- Gérer les webhooks
-- Ajouter des réactions
-- Gérer les événements
-- Tous les intents nécessaires
-
-🎉 Votre bot est maintenant opérationnel!
-*/
-client.login('VOTRE_TOKEN_ICI');
+            channel = await interaction.guild.create_text_channel(
+                name=f"ticket-{interaction.user.name}",
+                category=interaction.guild.get_channel(int(category_id)) if category_id else None,
+                overwrites=overwrites
+            )
+            # add support roles permissions
+            for rid in gcfg.get("ticketRoles", []):
+                role = interaction.guild.get_role(int(rid))
+                if role:
+                    await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
+
+            embed = Embed(title="🎫 Nouveau Ticket", description=f"Bonjour {interaction.user.mention}, décris ton problème.", color=0x3498db)
+            close_view = View()
+            close_view.add_item(Button(label="🔒 Fermer le Ticket", custom_id=f"close_ticket_{channel.id}", style=ButtonStyle.danger))
+            mentions = interaction.user.mention + (" " + " ".join(f"<@&{r}>" for r in gcfg.get("ticketRoles", [])) if gcfg.get("ticketRoles") else "")
+            await channel.send(content=mentions, embed=embed, view=close_view)
+            await interaction.followup.send(f"✅ Ticket créé: {channel.mention}", ephemeral=True)
+
+            log = Embed(title="🎫 Ticket Créé", description=f"**Créé par:** {interaction.user} \n**Salon:** {channel.mention}", color=0x3498db, timestamp=datetime.utcnow())
+            await send_log(interaction.guild, log)
+        except Exception as e:
+            await interaction.followup.send("❌ Erreur lors de la création du ticket.", ephemeral=True)
+
+# Close ticket buttons are handled in on_interaction
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    # Handle close ticket custom ids like close_ticket_<channelid>
+    if not interaction.type == discord.InteractionType.component:
+        return
+    cid = interaction.data.get("custom_id", "")
+    if cid.startswith("close_ticket_"):
+        # Confirm closure view
+        confirm = View()
+        confirm.add_item(Button(label="✅ Confirmer", custom_id=f"confirm_close_{interaction.channel.id}", style=ButtonStyle.danger))
+        confirm.add_item(Button(label="❌ Annuler", custom_id="cancel_close", style=ButtonStyle.secondary))
+        await interaction.response.send_message(embed=Embed(title="❓ Confirmer la fermeture", description="Êtes-vous sûr de fermer ce ticket ?"), view=confirm, ephemeral=True)
+        return
+    if cid.startswith("confirm_close_"):
+        # delete channel after short note
+        try:
+            await interaction.response.edit_message(content="🔒 Fermeture du ticket...", embed=None, view=None)
+        except Exception:
+            pass
+        try:
+            # log before deletion
+            log = Embed(title="🔒 Ticket Fermé", description=f"**Fermé par:** {interaction.user}\n**Salon:** {interaction.channel.name}", timestamp=datetime.utcnow(), color=0xe74c3c)
+            await send_log(interaction.guild, log)
+            # give a moment for message update then delete
+            await asyncio.sleep(1.5)
+            await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
+        except Exception:
+            pass
+        return
+    if cid == "cancel_close":
+        try:
+            await interaction.response.edit_message(content="✅ Fermeture annulée.", embed=None, view=None)
+        except Exception:
+            try:
+                await interaction.response.send_message("✅ Fermeture annulée.", ephemeral=True)
+            except Exception:
+                pass
+        return
+
+# --- Events: ready, join/leave, reactions, voice state updates ---
+@bot.event
+async def on_ready():
+    print(f"✅ Bot connecté en tant que {bot.user} (id: {bot.user.id})")
+    # Ensure persistent views
+    bot.add_view(HelpView())
+    bot.add_view(TicketView())
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    gcfg = get_gcfg(member.guild.id)
+    # assign join role
+    jr = gcfg.get("joinRole")
+    if jr:
+        role = member.guild.get_role(int(jr))
+        if role:
+            try:
+                await member.add_roles(role)
+            except Exception:
+                pass
+    # welcome messages
+    wc = gcfg.get("welcomeChannel")
+    if wc:
+        ch = member.guild.get_channel(int(wc))
+        if ch:
+            if gcfg.get("welcomeEmbed"):
+                we = gcfg["welcomeEmbed"]
+                embed = Embed(title=we.get("title", "Bienvenue!"), description=we.get("description", "").replace("{user}", member.mention).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count)), color=int(we.get("color", "0x2ecc71").replace("#", "0x"), 16))
+                try:
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                except Exception:
+                    pass
+                await ch.send(embed=embed)
+            if gcfg.get("welcomeText"):
+                txt = gcfg["welcomeText"].replace("{user}", member.mention).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count))
+                await ch.send(txt)
+    # log
+    log = Embed(title="📥 Membre Rejoint", description=f"**Membre:** {member} (`{member.id}`)\n**Compte créé:** <t:{int(member.created_at.timestamp())}:R>", color=0x2ecc71, timestamp=datetime.utcnow())
+    try:
+        await send_log(member.guild, log)
+    except Exception:
+        pass
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    gcfg = get_gcfg(member.guild.id)
+    lc = gcfg.get("leaveChannel")
+    if lc:
+        ch = member.guild.get_channel(int(lc))
+        if ch:
+            if gcfg.get("leaveEmbed"):
+                le = gcfg["leaveEmbed"]
+                embed = Embed(title=le.get("title", "Au revoir!"), description=le.get("description", "").replace("{user}", member.name).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count)), color=int(le.get("color", "0xff0000").replace("#", "0x"), 16))
+                try:
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                except Exception:
+                    pass
+                await ch.send(embed=embed)
+            if gcfg.get("leaveText"):
+                txt = gcfg["leaveText"].replace("{user}", member.name).replace("{server}", member.guild.name).replace("{membercount}", str(member.guild.member_count))
+                await ch.send(txt)
+    log = Embed(title="📤 Membre Parti", description=f"**Membre:** {member} (`{member.id}`)", color=0xe74c3c, timestamp=datetime.utcnow())
+    try:
+        await send_log(member.guild, log)
+    except Exception:
+        pass
+
+# Reaction role handling (use raw events to work across cache)
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+    gcfg = get_gcfg(payload.guild_id)
+    rr = gcfg.get("roleReacts", {})
+    msgid = str(payload.message_id)
+    if msgid not in rr:
+        return
+    entry = rr[msgid]
+    emoji = entry.get("emoji")
+    # compare using name or id string (payload.emoji may have id or name)
+    if (payload.emoji.id and str(payload.emoji.id) == str(emoji)) or (payload.emoji.name == emoji):
+        guild = bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+        member = guild.get_member(payload.user_id)
+        role = guild.get_role(int(entry["roleId"]))
+        if member and role:
+            try:
+                await member.add_roles(role)
+            except Exception:
+                pass
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    gcfg = get_gcfg(payload.guild_id)
+    rr = gcfg.get("roleReacts", {})
+    msgid = str(payload.message_id)
+    if msgid not in rr:
+        return
+    entry = rr[msgid]
+    emoji = entry.get("emoji")
+    if (payload.emoji.id and str(payload.emoji.id) == str(emoji)) or (payload.emoji.name == emoji):
+        guild = bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+        member = guild.get_member(payload.user_id)
+        role = guild.get_role(int(entry["roleId"]))
+        if member and role:
+            try:
+                await member.remove_roles(role)
+            except Exception:
+                pass
+
+# Temporary voice channels
+@bot.event
+async def on_voice_state_update(member, before, after):
+    gcfg = get_gcfg(member.guild.id)
+    join_channel_id = gcfg.get("tempVocJoinChannel")
+    temp_list = gcfg.get("tempVocChannels", [])
+    # Create
+    if after.channel and str(after.channel.id) == str(join_channel_id) and (not before.channel or before.channel.id != after.channel.id):
+        try:
+            category = member.guild.get_channel(int(gcfg.get("tempVocCategory"))) if gcfg.get("tempVocCategory") else None
+            temp = await member.guild.create_voice_channel(name=f"🎤 {member.name}", category=category)
+            gcfg.setdefault("tempVocChannels", []).append(str(temp.id))
+            save_config(config)
+            await member.move_to(temp)
+            # Give manager perms to owner
+            await temp.set_permissions(member, manage_channels=True, move_members=True, connect=True)
+        except Exception:
+            pass
+    # Delete empty
+    if before.channel and str(before.channel.id) in temp_list:
+        chan = before.channel
+        if len(chan.members) == 0:
+            try:
+                await chan.delete()
+            except Exception:
+                pass
+            gcfg["tempVocChannels"] = [x for x in gcfg.get("tempVocChannels", []) if x != str(chan.id)]
+            save_config(config)
+
+# --- Commands (prefix style) ---
+def admin_required():
+    async def predicate(ctx):
+        return ctx.author.guild_permissions.administrator
+    return commands.check(predicate)
+
+@bot.command(name="help")
+async def cmd_help(ctx):
+    embed = Embed(title="📚 Menu d'aide du Bot", description="Sélectionnez une catégorie pour voir les commandes", color=0x3498db)
+    await ctx.reply(embed=embed, view=HelpView())
+
+@bot.command(name="bvntext")
+@admin_required()
+async def cmd_bvntext(ctx, *, text: str = None):
+    if not text:
+        return await ctx.reply("❌ Usage: `!bvntext <message>`\nVariables: `{user}` `{server}` `{membercount}`")
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg["welcomeText"] = text
+    save_config(config)
+    preview = text.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name).replace("{membercount}", str(ctx.guild.member_count))
+    await ctx.reply(f"✅ Message de bienvenue (texte) configuré!\nExemple: {preview}")
+
+@bot.command(name="bvnembed")
+@admin_required()
+async def cmd_bvnembed(ctx, *, description: str = None):
+    if not description:
+        return await ctx.reply("❌ Usage: `!bvnembed <description>`")
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg["welcomeEmbed"] = {"title": "👋 Bienvenue!", "description": description, "color": "#00ff00"}
+    save_config(config)
+    embed = Embed(title="👋 Bienvenue!", description=description.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name).replace("{membercount}", str(ctx.guild.member_count)), color=0x00ff00)
+    await ctx.reply("✅ Embed de bienvenue configuré! Aperçu:", embed=embed)
+
+@bot.command(name="leavetxt")
+@admin_required()
+async def cmd_leavetxt(ctx, *, text: str = None):
+    if not text:
+        return await ctx.reply("❌ Usage: `!leavetxt <message>`")
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg["leaveText"] = text
+    save_config(config)
+    await ctx.reply("✅ Message de départ (texte) configuré!")
+
+@bot.command(name="leaveembed")
+@admin_required()
+async def cmd_leaveembed(ctx, *, description: str = None):
+    if not description:
+        return await ctx.reply("❌ Usage: `!leaveembed <description>`")
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg["leaveEmbed"] = {"title": "👋 Au revoir!", "description": description, "color": "#ff0000"}
+    save_config(config)
+    await ctx.reply("✅ Embed de départ configuré!")
+
+@bot.command(name="ticketpanel")
+@admin_required()
+async def cmd_ticketpanel(ctx):
+    embed = Embed(title="🎫 Support Tickets", description="Cliquez ci-dessous pour créer un ticket de support.", color=0x3498db)
+    view = TicketView()
+    await ctx.send(embed=embed, view=view)
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+@bot.command(name="ticketrole")
+@admin_required()
+async def cmd_ticketrole(ctx, role: discord.Role = None):
+    if not role:
+        return await ctx.reply("❌ Usage: `!ticketrole @role`")
+    gcfg = get_gcfg(ctx.guild.id)
+    if str(role.id) in gcfg.get("ticketRoles", []):
+        return await ctx.reply("❌ Ce rôle est déjà dans la liste des rôles de ticket.")
+    gcfg.setdefault("ticketRoles", []).append(str(role.id))
+    save_config(config)
+    await ctx.reply(f"✅ Le rôle {role.mention} sera mentionné dans les nouveaux tickets.")
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def cmd_ban(ctx, member: discord.Member = None, *, reason: str = "Aucune raison fournie"):
+    if not member:
+        return await ctx.reply("❌ Usage: `!ban @utilisateur [raison]`")
+    try:
+        await ctx.guild.ban(member, reason=reason)
+        embed = Embed(title="🔨 Membre Banni", description=f"**Membre:** {member}\n**Raison:** {reason}\n**Modérateur:** {ctx.author}", color=0xe74c3c, timestamp=datetime.utcnow())
+        await ctx.reply(embed=embed)
+        await send_log(ctx.guild, embed)
+    except Exception:
+        await ctx.reply("❌ Impossible de bannir cet utilisateur.")
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def cmd_unban(ctx, user_id: int = None):
+    if not user_id:
+        return await ctx.reply("❌ Usage: `!unban <ID utilisateur>`")
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user)
+        await ctx.reply(f"✅ L'utilisateur avec l'ID `{user_id}` a été débanni.")
+    except Exception:
+        await ctx.reply("❌ Impossible de débannir cet utilisateur.")
+
+@bot.command(name="mute")
+@commands.has_permissions(moderate_members=True)
+async def cmd_mute(ctx, member: discord.Member = None, duration: str = None, *, reason: str = "Aucune raison fournie"):
+    if not member or not duration:
+        return await ctx.reply("❌ Usage: `!mute @membre <durée> [raison]` (ex: 10m, 1h)")
+    secs = parse_duration(duration)
+    if secs is None:
+        return await ctx.reply("❌ Durée invalide. Utilisez: 10s, 5m, 1h, 1d")
+    until = datetime.utcnow() + timedelta(seconds=secs)
+    try:
+        await member.edit(communication_disabled_until=until, reason=reason)
+        embed = Embed(title="🔇 Membre Mute", description=f"**Membre:** {member}\n**Durée:** {duration}\n**Raison:** {reason}\n**Modérateur:** {ctx.author}", color=0xe67e22, timestamp=datetime.utcnow())
+        await ctx.reply(embed=embed)
+        await send_log(ctx.guild, embed)
+    except Exception:
+        await ctx.reply("❌ Impossible de mute ce membre.")
+
+@bot.command(name="unmute")
+@commands.has_permissions(moderate_members=True)
+async def cmd_unmute(ctx, member: discord.Member = None):
+    if not member:
+        return await ctx.reply("❌ Usage: `!unmute @membre`")
+    try:
+        await member.edit(communication_disabled_until=None)
+        await ctx.reply(f"✅ {member} a été unmute.")
+    except Exception:
+        await ctx.reply("❌ Impossible de unmute ce membre.")
+
+@bot.command(name="lock")
+@commands.has_permissions(manage_channels=True)
+async def cmd_lock(ctx):
+    try:
+        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+        await ctx.reply("🔒 Salon verrouillé! Seuls les modérateurs peuvent écrire.")
+    except Exception:
+        await ctx.reply("❌ Impossible de verrouiller ce salon.")
+
+@bot.command(name="unlock")
+@commands.has_permissions(manage_channels=True)
+async def cmd_unlock(ctx):
+    try:
+        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
+        await ctx.reply("🔓 Salon déverrouillé!")
+    except Exception:
+        await ctx.reply("❌ Impossible de déverrouiller ce salon.")
+
+@bot.command(name="modlent")
+@commands.has_permissions(manage_channels=True)
+async def cmd_modlent(ctx, seconds: int = 5):
+    if seconds < 0 or seconds > 21600:
+        return await ctx.reply("❌ Le délai doit être entre 0 et 21600 secondes (6 heures).")
+    try:
+        await ctx.channel.edit(slowmode_delay=seconds)
+        await ctx.reply(f"🐌 Mode lent activé: {seconds} secondes entre chaque message.")
+    except Exception:
+        await ctx.reply("❌ Impossible de définir le mode lent.")
+
+@bot.command(name="moderapide")
+@commands.has_permissions(manage_channels=True)
+async def cmd_moderapide(ctx):
+    try:
+        await ctx.channel.edit(slowmode_delay=0)
+        await ctx.reply("⚡ Mode lent désactivé!")
+    except Exception:
+        await ctx.reply("❌ Impossible de retirer le mode lent.")
+
+@bot.command(name="rolereact")
+@commands.has_permissions(manage_roles=True)
+async def cmd_rolereact(ctx, role: discord.Role = None, emoji: str = None, *, description: str = "Réagissez pour obtenir ce rôle!"):
+    if not role or not emoji:
+        return await ctx.reply("❌ Usage: `!rolereact @role <emoji> [description]`")
+    embed = Embed(title="🎭 Rôles Réactifs", description=f"{emoji} - {role.mention}\n\n{description}", color=0x9b59b6)
+    msg = await ctx.send(embed=embed)
+    try:
+        await msg.add_reaction(emoji)
+    except Exception:
+        pass
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg.setdefault("roleReacts", {})[str(msg.id)] = {"roleId": str(role.id), "emoji": emoji}
+    save_config(config)
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+@bot.command(name="createvoc")
+@commands.has_permissions(manage_channels=True)
+async def cmd_createvoc(ctx):
+    try:
+        # create category if not exists
+        category = discord.utils.get(ctx.guild.categories, name="🔊 Vocaux Temporaires")
+        if not category:
+            category = await ctx.guild.create_category("🔊 Vocaux Temporaires")
+        join = await ctx.guild.create_voice_channel("➕ Rejoindre pour créer", category=category)
+        gcfg = get_gcfg(ctx.guild.id)
+        gcfg["tempVocCategory"] = str(category.id)
+        gcfg["tempVocJoinChannel"] = str(join.id)
+        save_config(config)
+        await ctx.reply("✅ Système de vocal temporaire créé! Rejoignez le salon pour créer votre propre vocal.")
+    except Exception:
+        await ctx.reply("❌ Erreur lors de la création du système de vocal temporaire.")
+
+@bot.command(name="joinrole")
+@admin_required()
+async def cmd_joinrole(ctx, role: discord.Role = None):
+    if not role:
+        return await ctx.reply("❌ Usage: `!joinrole @role`")
+    gcfg = get_gcfg(ctx.guild.id)
+    gcfg["joinRole"] = str(role.id)
+    save_config(config)
+    await ctx.reply(f"✅ Le rôle {role.mention} sera maintenant donné aux nouveaux membres.")
+
+@bot.command(name="config")
+@admin_required()
+async def cmd_config(ctx):
+    embed = Embed(title="⚙️ Configuration du Bot", description="Sélectionnez ce que vous souhaitez configurer", color=0x3498db)
+    view = View(timeout=60)
+    select = Select(placeholder="Sélectionner une option", min_values=1, max_values=1, options=[
+        SelectOption(label="👋 Salon de Bienvenue", value="welcome_channel"),
+        SelectOption(label="👋 Salon de Départ", value="leave_channel"),
+        SelectOption(label="🎫 Catégorie Tickets", value="ticket_category"),
+        SelectOption(label="📝 Salon de Logs", value="log_channel"),
+        SelectOption(label="👤 Rôle Nouveaux Membres", value="join_role"),
+    ])
+    async def select_callback(interaction: discord.Interaction):
+        if interaction.user.id != ctx.author.id:
+            await interaction.response.send_message("❌ Seul l'auteur de la commande peut répondre.", ephemeral=True)
+            return
+        opt = select.values[0]
+        await interaction.response.send_message(f"📝 Mentionnez le salon/role/catégorie pour **{opt}**:", ephemeral=True)
+        def check(m):
+            return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("❌ Temps écoulé.", ephemeral=True)
+            return
+        gcfg = get_gcfg(ctx.guild.id)
+        if opt.endswith("channel"):
+            ch = msg.channel_mentions[0] if msg.channel_mentions else None
+            if ch:
+                if opt == "welcome_channel":
+                    gcfg["welcomeChannel"] = str(ch.id)
+                elif opt == "leave_channel":
+                    gcfg["leaveChannel"] = str(ch.id)
+                elif opt == "log_channel":
+                    gcfg["logChannel"] = str(ch.id)
+                save_config(config)
+                await msg.reply(f"✅ Salon configuré: {ch.mention}")
+                return
+        if opt.endswith("category"):
+            cat = msg.channel_mentions[0] if msg.channel_mentions else None
+            if cat and isinstance(cat, discord.channel.CategoryChannel):
+                gcfg["ticketCategory"] = str(cat.id)
+                save_config(config)
+                await msg.reply(f"✅ Catégorie configurée: {cat.name}")
+                return
+        if opt.endswith("role"):
+            role = msg.role_mentions[0] if msg.role_mentions else None
+            if role:
+                gcfg["joinRole"] = str(role.id)
+                save_config(config)
+                await msg.reply(f"✅ Rôle configuré: {role.mention}")
+                return
+        await msg.reply("❌ Élément invalide ou non trouvé.")
+    select.callback = select_callback
+    view.add_item(select)
+    await ctx.reply(embed=embed, view=view)
+
+# Simple error handler
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.reply("❌ Vous n'avez pas la permission d'utiliser cette commande.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.reply("❌ Argument manquant.")
+    # else: log or ignore
+    else:
+        try:
+            raise error
+        except Exception as e:
+            print("Command error:", e)
+
+# Run
+if __name__ == "__main__":
+    bot.run(TOKEN)
